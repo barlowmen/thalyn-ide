@@ -152,6 +152,45 @@ describe('RpcServer', () => {
 	});
 });
 
+describe('RpcServer notifications', () => {
+	it('routes inbound notifications (no id) to their handler', async () => {
+		const { server, input, received } = makeServer();
+		const observed: Array<{ kind: string }> = [];
+		server.registerNotification<{ kind: string }>('tool.approval.reply', params => {
+			observed.push(params);
+		});
+
+		input.write(JSON.stringify({ jsonrpc: '2.0', method: 'tool.approval.reply', params: { kind: 'approve' } }) + '\n');
+		await nextTick();
+
+		expect(observed).toEqual([{ kind: 'approve' }]);
+		expect(received).toEqual([]); // no response frame for notifications
+	});
+
+	it('emits outbound notifications without an id field', async () => {
+		const { server, received } = makeServer();
+		server.notify('message.chunk', { correlationId: 'c1', kind: 'text', text: 'hi' });
+		await nextTick();
+
+		expect(received).toHaveLength(1);
+		const frame = received[0] as unknown as { jsonrpc: string; method?: string; id?: unknown; params?: unknown };
+		expect(frame.jsonrpc).toBe('2.0');
+		expect(frame.method).toBe('message.chunk');
+		expect(frame.id).toBeUndefined();
+		expect(frame.params).toEqual({ correlationId: 'c1', kind: 'text', text: 'hi' });
+	});
+
+	it('swallows handler exceptions in notifications (no response channel)', async () => {
+		const { server, input, received } = makeServer();
+		server.registerNotification('boom', () => { throw new Error('nope'); });
+
+		input.write(JSON.stringify({ jsonrpc: '2.0', method: 'boom' }) + '\n');
+		await nextTick();
+
+		expect(received).toEqual([]);
+	});
+});
+
 describe('ping handler', () => {
 	it('returns a numeric timestamp roughly matching Date.now()', async () => {
 		const { server, input, received } = makeServer();
@@ -163,13 +202,11 @@ describe('ping handler', () => {
 		const after = Date.now();
 
 		expect(received).toHaveLength(1);
-		const response = received[0];
-		expect('result' in response).toBe(true);
-		if ('result' in response) {
-			const result = response.result as { timestamp: number };
-			expect(typeof result.timestamp).toBe('number');
-			expect(result.timestamp).toBeGreaterThanOrEqual(before);
-			expect(result.timestamp).toBeLessThanOrEqual(after);
-		}
+		const response = received[0] as { result?: { timestamp: number }; error?: unknown };
+		expect(response.error).toBeUndefined();
+		expect(response.result).toBeDefined();
+		expect(typeof response.result!.timestamp).toBe('number');
+		expect(response.result!.timestamp).toBeGreaterThanOrEqual(before);
+		expect(response.result!.timestamp).toBeLessThanOrEqual(after);
 	});
 });
