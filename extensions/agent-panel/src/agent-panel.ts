@@ -181,8 +181,8 @@ export class AgentPanelProvider implements WebviewViewProvider {
 				id="input"
 				class="input"
 				rows="3"
-				placeholder="Message the agent&#8230;"
-				aria-label="Message the agent"></textarea>
+				placeholder="Message Thalyn&#8230;"
+				aria-label="Message Thalyn"></textarea>
 			<button type="submit" id="submit" class="submit">Send</button>
 		</form>
 	</div>
