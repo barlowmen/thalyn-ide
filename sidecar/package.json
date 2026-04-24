@@ -1,0 +1,20 @@
+{
+	"name": "thalyn-sidecar",
+	"private": true,
+	"version": "0.0.1",
+	"description": "Thalyn agent sidecar process.",
+	"type": "commonjs",
+	"main": "./out/index.js",
+	"scripts": {
+		"compile": "tsc -p .",
+		"watch": "tsc -w -p .",
+		"pretest": "npm run compile",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	},
+	"devDependencies": {
+		"@types/node": "22.x",
+		"typescript": "^5.9.0",
+		"vitest": "^2.1.0"
+	}
+}
