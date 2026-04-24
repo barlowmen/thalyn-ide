@@ -8,17 +8,17 @@ import Database from 'better-sqlite3';
 /**
  * The single point of SQLite access in the harness.
  *
- * Per CLAUDE.md: session state, conversation history, and budget meters
- * write through this module. No other module opens its own database
- * handle. Consumers (`BudgetMeter`, `SqliteSpanExporter`, the
- * session/history loader) take a `Persistence` instance as a dep.
+ * Session state, conversation history, and budget meters all write
+ * through this module; no other module opens its own database handle.
+ * Consumers (`BudgetMeter`, `SqliteSpanExporter`, the session/history
+ * loader) take a `Persistence` instance as a dep.
  *
  * The schema here is the minimum needed by the budget subsystem and the
  * OTEL→SQLite exporter: `sessions` (as the FK target for `session_id`
- * columns), `budget_ledger`, and `traces`. Conversation-history,
- * tool-call, routing-decision, and budget-snapshot tables land alongside
- * the three-layer memory work later in the phase; they slot in as
- * additional `CREATE TABLE IF NOT EXISTS` statements in {@link initSchema}.
+ * columns), `budget_ledger`, and `traces`. Additional tables
+ * (conversation history, tool calls, routing decisions, budget
+ * snapshots) slot in later as additional `CREATE TABLE IF NOT EXISTS`
+ * statements in {@link initSchema}.
  */
 export class Persistence {
 	private readonly db: Database.Database;
