@@ -49,17 +49,6 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	console.log('Starting hygiene...');
 	let errorCount = 0;
 
-	const productJson = es.through(function (file: VinylFile) {
-		const product = JSON.parse(file.contents!.toString('utf8'));
-
-		if (product.extensionsGallery) {
-			console.error(`product.json: Contains 'extensionsGallery'`);
-			errorCount++;
-		}
-
-		this.emit('data', file);
-	});
-
 	const unicode = es.through(function (file: VinylFileWithLines) {
 		const lines = file.contents!.toString('utf8').split(/\r\n|\r|\n/);
 		file.__lines = lines;
@@ -165,7 +154,6 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		input = some;
 	}
 
-	const productJsonFilter = filter('product.json', { restore: true });
 	const snapshotFilter = filter(['**', '!**/*.snap', '!**/*.snap.actual']);
 	const yarnLockFilter = filter(['**', '!**/yarn.lock']);
 	const unicodeFilterStream = filter(Array.from(unicodeFilter), { restore: true });
@@ -174,9 +162,6 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		.pipe(filter((f) => Boolean(f.stat && !f.stat.isDirectory())))
 		.pipe(snapshotFilter)
 		.pipe(yarnLockFilter)
-		.pipe(productJsonFilter)
-		.pipe(process.env['BUILD_SOURCEVERSION'] ? es.through() : productJson)
-		.pipe(productJsonFilter.restore)
 		.pipe(unicodeFilterStream)
 		.pipe(unicode)
 		.pipe(unicodeFilterStream.restore)
