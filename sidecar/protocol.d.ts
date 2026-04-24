@@ -77,3 +77,102 @@ export type PingParams = undefined;
 export interface PingResult {
 	readonly timestamp: number;
 }
+
+/**
+ * Tool-permission tier, ordered by destructive potential
+ * (`read < write < delete < external`). `read` is auto-approved by the
+ * sidecar; anything else requires explicit user approval before the tool
+ * can execute.
+ */
+export type ToolTier = 'read' | 'write' | 'delete' | 'external';
+
+/** Decision the user returns for a pending approval request. */
+export type ApprovalDecision = 'approve' | 'decline' | 'approve-for-session';
+
+// ---------------------------------------------------------------------------
+// `message.send` — webview → sidecar, initiates a turn.
+//
+// Request/response: the response resolves when the turn is complete. Streaming
+// text, tool events, and approval prompts all flow as JSON-RPC notifications
+// (see below), correlated by `correlationId`.
+// ---------------------------------------------------------------------------
+
+export type MessageSendMethod = 'message.send';
+
+export interface MessageSendParams {
+	/** Unique id minted per turn; echoed on every `message.chunk`. */
+	readonly correlationId: string;
+	/** Raw user text. */
+	readonly text: string;
+}
+
+export interface MessageSendResult {
+	readonly correlationId: string;
+	/** SDK terminal reason. `success` on normal completion. */
+	readonly subtype: 'success' | 'error';
+	/** SDK session id — surfaced for later resume support. */
+	readonly sessionId?: string;
+	/** Populated when `subtype === 'error'`. */
+	readonly errorKind?: 'network' | 'auth' | 'rate_limit' | 'declined' | 'unknown';
+	readonly errorMessage?: string;
+}
+
+// ---------------------------------------------------------------------------
+// `message.chunk` — sidecar → webview, streaming notifications for a turn.
+// ---------------------------------------------------------------------------
+
+export type MessageChunkMethod = 'message.chunk';
+
+export type MessageChunkKind = 'text' | 'tool_use' | 'tool_result' | 'tool_denied' | 'done' | 'error';
+
+export interface MessageChunkParams {
+	readonly correlationId: string;
+	readonly kind: MessageChunkKind;
+	/** Present on `kind: 'text'`. Concatenated text from an assistant turn. */
+	readonly text?: string;
+	/** Present on tool events. SDK-assigned id, distinct from approval correlationId. */
+	readonly toolUseId?: string;
+	readonly toolName?: string;
+	readonly toolInput?: Record<string, unknown>;
+	readonly toolSummary?: string;
+	/** Present on `kind: 'tool_result'`. String-rendered tool output. */
+	readonly toolResult?: string;
+	readonly toolIsError?: boolean;
+	/** Present on `kind: 'error' | 'tool_denied'`. */
+	readonly errorKind?: 'network' | 'auth' | 'rate_limit' | 'declined' | 'unknown';
+	readonly errorMessage?: string;
+}
+
+// ---------------------------------------------------------------------------
+// `tool.approval.request` — sidecar → webview, asks the user to approve a
+// destructive tool call. Fired from the Agent SDK's `canUseTool` hook.
+// ---------------------------------------------------------------------------
+
+export type ToolApprovalRequestMethod = 'tool.approval.request';
+
+export interface ToolApprovalRequestParams {
+	/** Unique id minted per approval prompt. Must match on the reply. */
+	readonly correlationId: string;
+	/** The enclosing turn's correlationId, so the webview can group events. */
+	readonly turnCorrelationId: string;
+	readonly toolName: string;
+	readonly toolTier: ToolTier;
+	readonly toolUseId: string;
+	/** One-line user-facing description of the proposed action. */
+	readonly summary: string;
+	readonly input: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// `tool.approval.reply` — webview → sidecar, user's response to an approval
+// request. Notification (no response expected).
+// ---------------------------------------------------------------------------
+
+export type ToolApprovalReplyMethod = 'tool.approval.reply';
+
+export interface ToolApprovalReplyParams {
+	readonly correlationId: string;
+	readonly decision: ApprovalDecision;
+	/** Optional reason for `decline`; surfaced to the model via SDK deny message. */
+	readonly declineReason?: string;
+}

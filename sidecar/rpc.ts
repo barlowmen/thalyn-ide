@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { Readable, Writable } from 'stream';
-import type { JsonRpcRequest, JsonRpcResponse } from './protocol';
+import type { JsonRpcNotification, JsonRpcRequest, JsonRpcResponse } from './protocol';
 
 /** Sidecar-internal names for the JSON-RPC 2.0 standard error codes. */
 const enum ErrorCode {
@@ -17,15 +17,25 @@ const enum ErrorCode {
 export type RpcHandler<TParams = unknown, TResult = unknown> =
 	(params: TParams) => Promise<TResult> | TResult;
 
+export type RpcNotificationHandler<TParams = unknown> =
+	(params: TParams) => void;
+
 /**
  * Minimal JSON-RPC 2.0 server over newline-delimited JSON.
  *
  * One line == one complete JSON message. Handlers are registered by method
  * name; unknown methods, malformed JSON, and handler exceptions are all
  * reported as standard JSON-RPC error responses.
+ *
+ * The server also speaks notifications (messages without an `id`) in both
+ * directions: inbound notifications route to handlers registered via
+ * `registerNotification`; outbound notifications are emitted via `notify`.
+ * This is what the sidecar uses to push streaming chunks and approval
+ * prompts to the extension host without blocking a response slot.
  */
 export class RpcServer {
 	private readonly handlers = new Map<string, RpcHandler>();
+	private readonly notificationHandlers = new Map<string, RpcNotificationHandler>();
 	private buffer = '';
 	private closed = false;
 
@@ -40,6 +50,15 @@ export class RpcServer {
 
 	register<TParams, TResult>(method: string, handler: RpcHandler<TParams, TResult>): void {
 		this.handlers.set(method, handler as RpcHandler);
+	}
+
+	registerNotification<TParams>(method: string, handler: RpcNotificationHandler<TParams>): void {
+		this.notificationHandlers.set(method, handler as RpcNotificationHandler);
+	}
+
+	notify<TParams>(method: string, params: TParams): void {
+		const message: JsonRpcNotification<TParams> = { jsonrpc: '2.0', method, params };
+		this.output.write(JSON.stringify(message) + '\n');
 	}
 
 	private onData(chunk: string): void {
@@ -68,6 +87,18 @@ export class RpcServer {
 				id: null,
 				error: { code: ErrorCode.ParseError, message: 'Parse error' },
 			});
+			return;
+		}
+
+		if (isJsonRpcNotification(parsed)) {
+			const handler = this.notificationHandlers.get(parsed.method);
+			if (handler) {
+				try {
+					handler(parsed.params);
+				} catch {
+					// Notifications have no response channel; swallow handler failures.
+				}
+			}
 			return;
 		}
 
@@ -127,6 +158,21 @@ function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
 		return false;
 	}
 	return true;
+}
+
+function isJsonRpcNotification(value: unknown): value is JsonRpcNotification {
+	if (typeof value !== 'object' || value === null) {
+		return false;
+	}
+	const candidate = value as Partial<JsonRpcRequest>;
+	if (candidate.jsonrpc !== '2.0') {
+		return false;
+	}
+	if (typeof candidate.method !== 'string') {
+		return false;
+	}
+	// Notifications omit `id` entirely.
+	return candidate.id === undefined;
 }
 
 function idOrNull(value: unknown): number | string | null {

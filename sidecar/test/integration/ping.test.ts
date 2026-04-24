@@ -37,13 +37,14 @@ describe('sidecar integration', () => {
 			}) + '\n');
 		});
 
-		if ('error' in response) {
-			throw new Error(`sidecar returned error: ${JSON.stringify(response.error)}; stderr=${stderrChunks.join('')}`);
+		const err = (response as { error?: unknown }).error;
+		if (err !== undefined) {
+			throw new Error(`sidecar returned error: ${JSON.stringify(err)}; stderr=${stderrChunks.join('')}`);
 		}
 
 		expect(response.jsonrpc).toBe('2.0');
 		expect(response.id).toBe(1);
-		const result = response.result as PingResult;
+		const result = (response as { result: PingResult }).result;
 		expect(typeof result.timestamp).toBe('number');
 		expect(result.timestamp).toBeGreaterThan(0);
 	});
