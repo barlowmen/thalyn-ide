@@ -7,8 +7,6 @@
  * Shared types for the budget subsystem. The concrete configuration
  * loader, estimator, and meter live next to this file; this module is
  * the common surface they all import from.
- *
- * Design reference: `.claude/adrs/0005-budget-subsystem.md`.
  */
 
 /** The unit a category is denominated in. USD for paid APIs and LLMs; `gpu_seconds` for local inference. */
