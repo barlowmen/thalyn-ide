@@ -162,6 +162,10 @@ export class ClaudeAdapter implements CentralBrain {
 
 		try {
 			for await (const message of iterator) {
+				if (request.signal?.aborted) {
+					yield errorEvent(cancelledError());
+					return;
+				}
 				if (!sessionId && message.session_id) {
 					sessionId = message.session_id;
 				}
@@ -201,6 +205,10 @@ export class ClaudeAdapter implements CentralBrain {
 				// `user` and `system` messages carry SDK-internal bookkeeping
 				// (tool results produced by the SDK's own tool runner,
 				// session init). The brain contract does not expose them.
+			}
+			if (request.signal?.aborted) {
+				yield errorEvent(cancelledError());
+				return;
 			}
 			yield { kind: 'done', sessionId, stopReason };
 		} catch (err) {
@@ -249,12 +257,16 @@ function cancelledError(): BrainError {
 }
 
 /**
- * Map a thrown SDK error to a typed `BrainError`. Classification is
- * intentionally conservative — the richer retriable-vs-terminal taxonomy
- * and exponential-backoff logic arrives with the cancel + error follow-up
- * pass. Today we cover the common substring tells the SDK surfaces
- * (`401`/`unauthorized`, `429`/`rate limit`, `ECONNREFUSED`/`fetch failed`,
- * `AbortError`) and default everything else to `unknown`.
+ * Map a thrown SDK error to a typed `BrainError`. The harness's retry
+ * wrapper reads `retriable` + (for rate-limit) `retryAfterMs` to decide
+ * backoff, so the classification here is load-bearing: misclassifying a
+ * transient failure as `unknown` silently turns off retry.
+ *
+ * Classification order: abort → auth → rate-limit → network → dropped
+ * socket → unknown. `AbortError` and an aborted caller signal both map to
+ * `cancelled`. Substring tells cover what the Agent SDK and its fetch
+ * underlayer surface in practice (`401`, `429`, `ECONNREFUSED`,
+ * `ECONNRESET`, `socket hang up`, `premature close`, `fetch failed`).
  */
 function classifyError(err: unknown, signal?: AbortSignal): BrainError {
 	if (err instanceof Error && (err.name === 'AbortError' || signal?.aborted)) {
@@ -262,20 +274,84 @@ function classifyError(err: unknown, signal?: AbortSignal): BrainError {
 	}
 	const message = err instanceof Error ? err.message : String(err);
 	const lower = message.toLowerCase();
-	if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('api key') || lower.includes('authentication')) {
+	const status = readHttpStatus(err);
+	if (status === 401 || status === 403 || lower.includes('401') || lower.includes('unauthorized') || lower.includes('api key') || lower.includes('authentication')) {
 		return { kind: 'auth', message, retriable: false, cause: err };
 	}
-	if (lower.includes('429') || lower.includes('rate limit')) {
+	if (status === 429 || lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests')) {
+		const retryAfterMs = extractRetryAfterMs(err);
+		if (retryAfterMs !== undefined) {
+			return { kind: 'rate_limit', message, retriable: true, retryAfterMs, cause: err };
+		}
 		return { kind: 'rate_limit', message, retriable: true, cause: err };
 	}
 	if (
+		(typeof status === 'number' && status >= 500 && status < 600) ||
 		lower.includes('econnrefused') ||
+		lower.includes('econnreset') ||
 		lower.includes('enotfound') ||
 		lower.includes('etimedout') ||
+		lower.includes('epipe') ||
+		lower.includes('socket hang up') ||
+		lower.includes('premature close') ||
 		lower.includes('fetch failed') ||
 		lower.includes('network')
 	) {
 		return { kind: 'network', message, retriable: true, cause: err };
 	}
 	return { kind: 'unknown', message, retriable: false, cause: err };
+}
+
+/**
+ * Pull a `Retry-After` hint off a thrown error. Checks `retry-after-ms`
+ * (already milliseconds) before `retry-after` (delta-seconds per RFC
+ * 9110) and inspects both `err.headers` and common top-level shapes
+ * (`retryAfter`, `retry_after`) so the adapter works whether the SDK
+ * forwards the raw fetch `Response`'s headers or a flattened error object.
+ */
+function extractRetryAfterMs(err: unknown): number | undefined {
+	if (err === null || typeof err !== 'object') {
+		return undefined;
+	}
+	const record = err as Record<string, unknown>;
+	const headers = record.headers;
+	if (headers && typeof headers === 'object') {
+		const h = headers as Record<string, unknown>;
+		const ms = numeric(h['retry-after-ms'] ?? h['Retry-After-Ms']);
+		if (ms !== undefined) {
+			return ms;
+		}
+		const seconds = numeric(h['retry-after'] ?? h['Retry-After']);
+		if (seconds !== undefined) {
+			return Math.round(seconds * 1000);
+		}
+	}
+	const direct = numeric(record.retryAfterMs);
+	if (direct !== undefined) {
+		return direct;
+	}
+	const directSeconds = numeric(record.retryAfter ?? record.retry_after);
+	if (directSeconds !== undefined) {
+		return Math.round(directSeconds * 1000);
+	}
+	return undefined;
+}
+
+function numeric(value: unknown): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	if (typeof value === 'string' && /^\d+(\.\d+)?$/.test(value)) {
+		return Number(value);
+	}
+	return undefined;
+}
+
+function readHttpStatus(err: unknown): number | undefined {
+	if (err === null || typeof err !== 'object') {
+		return undefined;
+	}
+	const record = err as Record<string, unknown>;
+	const status = record.status ?? record.statusCode;
+	return typeof status === 'number' && Number.isFinite(status) ? status : undefined;
 }

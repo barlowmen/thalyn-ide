@@ -10,7 +10,7 @@ import {
 	type ClaudeQueryOptions,
 	type ClaudeSdkMessage,
 } from './claude-adapter';
-import type { BrainMessage, BrainRequest, BrainStreamEvent } from './types';
+import type { BrainError, BrainMessage, BrainRequest, BrainStreamEvent } from './types';
 import type { ToolSchema } from '../tools/types';
 
 function scriptedQuery(
@@ -282,5 +282,111 @@ describe('ClaudeAdapter.send', () => {
 		};
 		await collect(adapter.send(baseRequest({ messages: [lastUser] })));
 		expect(captured.prompt).toBe('line one\nline two');
+	});
+
+	it('cancels mid-stream: forwards abort to SDK, drops subsequent events, terminates with cancelled', async () => {
+		const captured: { sdkAbort?: AbortController } = {};
+		const cancelWhenAborted = (signal: AbortSignal) =>
+			new Promise<void>(resolve => {
+				if (signal.aborted) {
+					resolve();
+					return;
+				}
+				signal.addEventListener('abort', () => resolve(), { once: true });
+			});
+
+		const query: ClaudeQueryFn = ({ options }) => {
+			captured.sdkAbort = options?.abortController;
+			return (async function* () {
+				yield assistantText('partial ');
+				await cancelWhenAborted(options!.abortController!.signal);
+				throw Object.assign(new Error('aborted by caller'), { name: 'AbortError' });
+			})();
+		};
+
+		const controller = new AbortController();
+		const adapter = new ClaudeAdapter({ query });
+		const events: BrainStreamEvent[] = [];
+		for await (const ev of adapter.send(baseRequest({ signal: controller.signal }))) {
+			events.push(ev);
+			if (ev.kind === 'text') {
+				controller.abort();
+			}
+		}
+
+		expect(captured.sdkAbort?.signal.aborted).toBe(true);
+		expect(events[0]).toEqual({ kind: 'text', text: 'partial ' });
+		const terminal = events.at(-1);
+		expect(terminal?.kind).toBe('error');
+		expect(terminal).toMatchObject({
+			error: { kind: 'cancelled', retriable: false },
+		});
+		expect(events.some(e => e.kind === 'done')).toBe(false);
+	});
+
+	it('network disconnect mid-stream: forwards earlier text then terminates with network error', async () => {
+		const { query } = scriptedQuery([
+			assistantText('streaming '),
+			assistantText('bytes'),
+			Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+		]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const events = await collect(adapter.send(baseRequest()));
+
+		expect(events.slice(0, -1)).toEqual([
+			{ kind: 'text', text: 'streaming ' },
+			{ kind: 'text', text: 'bytes' },
+		]);
+		expect(events.at(-1)).toMatchObject({
+			kind: 'error',
+			error: { kind: 'network', retriable: true },
+		});
+		expect(events.some(e => e.kind === 'done')).toBe(false);
+	});
+
+	it('rate-limit response: surfaces retryAfterMs from Retry-After-Ms header', async () => {
+		const err = Object.assign(new Error('HTTP 429 too many requests'), {
+			status: 429,
+			headers: { 'retry-after-ms': '1500' },
+		});
+		const { query } = scriptedQuery([err]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const events = await collect(adapter.send(baseRequest()));
+
+		expect(events).toHaveLength(1);
+		const terminal = events[0];
+		expect(terminal.kind).toBe('error');
+		const error = (terminal as Extract<BrainStreamEvent, { kind: 'error' }>).error as BrainError & { kind: 'rate_limit' };
+		expect(error.kind).toBe('rate_limit');
+		expect(error.retriable).toBe(true);
+		expect(error.retryAfterMs).toBe(1500);
+	});
+
+	it('rate-limit response: converts delta-seconds Retry-After to milliseconds', async () => {
+		const err = Object.assign(new Error('429: slow down'), {
+			status: 429,
+			headers: { 'Retry-After': '2' },
+		});
+		const { query } = scriptedQuery([err]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const events = await collect(adapter.send(baseRequest()));
+
+		const error = (events[0] as Extract<BrainStreamEvent, { kind: 'error' }>).error as BrainError & { kind: 'rate_limit' };
+		expect(error.kind).toBe('rate_limit');
+		expect(error.retryAfterMs).toBe(2000);
+	});
+
+	it('rate-limit response: omits retryAfterMs when the provider gives no hint', async () => {
+		const { query } = scriptedQuery([new Error('HTTP 429 rate limit hit')]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const events = await collect(adapter.send(baseRequest()));
+
+		const error = (events[0] as Extract<BrainStreamEvent, { kind: 'error' }>).error as BrainError & { kind: 'rate_limit' };
+		expect(error.kind).toBe('rate_limit');
+		expect(error.retryAfterMs).toBeUndefined();
 	});
 });
