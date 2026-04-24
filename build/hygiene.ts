@@ -26,7 +26,7 @@ const microsoftCopyrightHeaderLines = [
 const thalynCopyrightHeaderLines = [
 	'/*---------------------------------------------------------------------------------------------',
 	' *  Copyright (c) Thalyn. All rights reserved.',
-	' *  See LICENSE in the project root for license information.',
+	' *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.',
 	' *--------------------------------------------------------------------------------------------*/',
 ];
 

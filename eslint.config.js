@@ -127,7 +127,7 @@ export default tseslint.config(
 				[
 					'---------------------------------------------------------------------------------------------',
 					{ pattern: ' \\*  Copyright \\(c\\) (?:Microsoft Corporation|Thalyn)\\. All rights reserved\\.' },
-					{ pattern: ' \\*  (?:Licensed under the MIT License\\. See License\\.txt|See LICENSE) in the project root for license information\\.' },
+					{ pattern: ' \\*  Licensed under the MIT License\\. See (?:License\\.txt|LICENSE\\.txt) in the project root for license information\\.' },
 					' *--------------------------------------------------------------------------------------------'
 				]
 			]
