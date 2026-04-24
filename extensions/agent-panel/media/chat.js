@@ -1,11 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 // Webview script for the Thalyn Agent chat panel.
 // Protocol source of truth: extensions/agent-panel/src/protocol.ts
-// Design rationale: .claude/adrs/0002-webview-message-protocol.md (outer project folder).
 
 /**
  * @typedef {{ type: 'user.submit', correlationId: string, text: string }} UserSubmit
@@ -25,9 +24,8 @@
 	const composerEl = /** @type {HTMLFormElement} */ (document.getElementById('composer'));
 	const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
 
-	// Pending submits keyed by correlationId. Day 2 uses this to ignore echoes
-	// whose correlationId we did not mint; Day 3 switches this map to tracking
-	// in-flight JSON-RPC requests.
+	// Pending submits keyed by correlationId. Used to drop echoes whose
+	// correlationId we did not mint.
 	/** @type {Map<string, string>} */
 	const pending = new Map();
 

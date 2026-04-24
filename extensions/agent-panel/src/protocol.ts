@@ -1,12 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Webview <-> extension host message protocol.
-// Design rationale and decisions: .claude/adrs/0002-webview-message-protocol.md
-// Day 2: echo stub only. Sidecar / RPC traffic (message.send, message.chunk,
-// error.*) is added in Day 3+ by extending these unions.
+// Webview <-> extension host message protocol. Sidecar / RPC traffic is
+// added by extending these discriminated unions.
 
 export type CorrelationId = string;
 
