@@ -20,7 +20,7 @@ import type {
  * `tool.approval.reply`. Tools the user explicitly approved for the
  * session pass through without re-prompting.
  *
- * This is the authoritative gate (see ADR 0012). The Claude adapter's
+ * This is the authoritative gate. The Claude adapter's
  * SDK-level `canUseTool` hook delegates here; under API-key auth that
  * hook fires and defers to us, under OAuth auth the SDK bypasses the
  * hook, but once the dispatcher's `invoke()` is on the tool execution
