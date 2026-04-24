@@ -65,13 +65,12 @@ export class ToolDispatcher {
 
 	/**
 	 * Run the approval gate for a proposed call without executing it.
-	 * The Claude adapter's SDK-level `canUseTool` hook uses this — the
-	 * SDK owns tool execution today, so the adapter needs the gate
-	 * decision, not the backend result. Once Day-2+ work routes the
-	 * Claude adapter's tool execution through `invoke()`, this
-	 * becomes belt-and-braces for API-key auth only; under OAuth it
-	 * is bypassed by the bundled CLI and the dispatcher's `invoke()`
-	 * is the only enforcement point.
+	 * The Claude adapter's SDK-level `canUseTool` hook calls this —
+	 * on that code path the SDK, not the dispatcher, executes the
+	 * tool, so the adapter only needs the gate's decision. The hook
+	 * fires under API-key authentication; under OAuth the bundled
+	 * CLI bypasses `canUseTool`, so the authoritative enforcement
+	 * point is the approval step inside `invoke()`.
 	 */
 	async checkApproval(request: DispatcherApprovalRequest): Promise<DispatcherApprovalOutcome> {
 		const tool = this.tools.get(request.toolName);
