@@ -17,10 +17,19 @@
 	const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
 	const submitEl = /** @type {HTMLButtonElement} */ (document.getElementById('submit'));
 
-	/** @type {Map<string, { textEl: HTMLElement | null, toolsEl: HTMLElement | null, statusEl: HTMLElement }>} */
+	/** @type {Map<string, { textEl: HTMLElement, toolsEl: HTMLElement, statusEl: HTMLElement, errorEl: HTMLElement, errorShown: boolean }>} */
 	const turns = new Map();
 	/** @type {Map<string, HTMLElement>} */
 	const approvalCards = new Map();
+
+	/** @type {Record<string, string>} */
+	const errorKindLabels = {
+		network: 'Network error',
+		auth: 'Authentication error',
+		rate_limit: 'Rate limit',
+		declined: 'Declined',
+		unknown: 'Error',
+	};
 
 	/** @param {string} role */
 	function createMessageElement(role) {
@@ -46,15 +55,41 @@
 		const toolsEl = document.createElement('div');
 		toolsEl.className = 'message-tools';
 		li.appendChild(toolsEl);
+		const errorEl = document.createElement('div');
+		errorEl.className = 'message-error';
+		li.appendChild(errorEl);
 		const statusEl = document.createElement('div');
 		statusEl.className = 'message-status';
 		statusEl.textContent = 'thinking...';
 		li.appendChild(statusEl);
 		messagesEl.appendChild(li);
-		const record = { textEl, toolsEl, statusEl };
+		const record = { textEl, toolsEl, statusEl, errorEl, errorShown: false };
 		turns.set(correlationId, record);
 		scrollToBottom();
 		return record;
+	}
+
+	/**
+	 * @param {{ errorEl: HTMLElement, errorShown: boolean }} turn
+	 * @param {string | undefined} kind
+	 * @param {string | undefined} message
+	 */
+	function renderTurnError(turn, kind, message) {
+		const label = errorKindLabels[kind || 'unknown'] || 'Error';
+		const text = message && message.length ? message : 'The turn ended without a response.';
+		const block = document.createElement('div');
+		block.className = 'error-block error-' + (kind || 'unknown');
+		const labelEl = document.createElement('div');
+		labelEl.className = 'error-label';
+		labelEl.textContent = label;
+		block.appendChild(labelEl);
+		const textNode = document.createElement('div');
+		textNode.className = 'error-text';
+		textNode.textContent = text;
+		block.appendChild(textNode);
+		turn.errorEl.appendChild(block);
+		turn.errorShown = true;
+		scrollToBottom();
 	}
 
 	function scrollToBottom() {
@@ -90,39 +125,33 @@
 		const turn = ensureTurnContainer(chunk.correlationId);
 		switch (chunk.kind) {
 			case 'text': {
-				if (turn.textEl && typeof chunk.text === 'string') {
+				if (typeof chunk.text === 'string') {
 					turn.textEl.textContent = (turn.textEl.textContent || '') + chunk.text;
 					scrollToBottom();
 				}
 				return;
 			}
 			case 'tool_use': {
-				if (turn.toolsEl) {
-					const summary = chunk.toolSummary || chunk.toolName || 'Tool call';
-					appendToolLine(turn.toolsEl, 'tool-use', '> ' + summary);
-				}
+				const summary = chunk.toolSummary || chunk.toolName || 'Tool call';
+				appendToolLine(turn.toolsEl, 'tool-use', '> ' + summary);
+				turn.statusEl.textContent = chunk.toolName ? 'running ' + chunk.toolName + '...' : 'running tool...';
 				return;
 			}
 			case 'tool_result': {
-				if (turn.toolsEl) {
-					const text = typeof chunk.toolResult === 'string' ? chunk.toolResult : '';
-					const trimmed = text.length > 240 ? text.slice(0, 240) + '...' : text;
-					appendToolLine(turn.toolsEl, chunk.toolIsError ? 'tool-result-error' : 'tool-result', '< ' + trimmed);
-				}
+				const text = typeof chunk.toolResult === 'string' ? chunk.toolResult : '';
+				const trimmed = text.length > 240 ? text.slice(0, 240) + '...' : text;
+				appendToolLine(turn.toolsEl, chunk.toolIsError ? 'tool-result-error' : 'tool-result', '< ' + trimmed);
+				turn.statusEl.textContent = 'thinking...';
 				return;
 			}
 			case 'tool_denied': {
-				if (turn.toolsEl) {
-					const label = chunk.toolName ? chunk.toolName + ' declined' : 'tool declined';
-					appendToolLine(turn.toolsEl, 'tool-denied', 'x ' + label);
-				}
+				const label = chunk.toolName ? chunk.toolName + ' declined' : 'tool declined';
+				appendToolLine(turn.toolsEl, 'tool-denied', 'x ' + label);
+				turn.statusEl.textContent = 'thinking...';
 				return;
 			}
 			case 'error': {
-				if (turn.toolsEl) {
-					const msg = chunk.errorMessage || 'Error';
-					appendToolLine(turn.toolsEl, 'tool-error', '! ' + msg);
-				}
+				renderTurnError(turn, chunk.errorKind, chunk.errorMessage);
 				turn.statusEl.textContent = '';
 				return;
 			}
@@ -137,11 +166,11 @@
 	function handleComplete(completion) {
 		const turn = turns.get(completion.correlationId);
 		if (!turn) {
+			setComposerEnabled(true);
 			return;
 		}
-		if (completion.subtype === 'error') {
-			const msg = completion.errorMessage || 'Turn ended with an error';
-			appendToolLine(turn.toolsEl || turn.statusEl, 'tool-error', '! ' + msg);
+		if (completion.subtype === 'error' && !turn.errorShown) {
+			renderTurnError(turn, completion.errorKind, completion.errorMessage);
 		}
 		turn.statusEl.textContent = '';
 		setComposerEnabled(true);
@@ -163,13 +192,19 @@
 		summary.textContent = request.summary || '';
 		card.appendChild(summary);
 
-		const details = document.createElement('pre');
+		const details = document.createElement('details');
 		details.className = 'approval-details';
+		const detailsSummary = document.createElement('summary');
+		detailsSummary.textContent = 'Details';
+		details.appendChild(detailsSummary);
+		const pre = document.createElement('pre');
+		pre.className = 'approval-details-body';
 		try {
-			details.textContent = JSON.stringify(request.input, null, 2);
+			pre.textContent = JSON.stringify(request.input, null, 2);
 		} catch (_e) {
-			details.textContent = String(request.input);
+			pre.textContent = String(request.input);
 		}
+		details.appendChild(pre);
 		card.appendChild(details);
 
 		const actions = document.createElement('div');
