@@ -1,0 +1,284 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+html, body {
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	color: var(--vscode-foreground);
+	background: var(--vscode-sideBar-background);
+}
+
+.chat {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+	box-sizing: border-box;
+}
+
+.messages {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	list-style: none;
+	margin: 0;
+	padding: 12px;
+}
+
+.message {
+	margin-bottom: 12px;
+	padding: 8px 10px;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+}
+
+.message.user {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border-left: 2px solid var(--vscode-focusBorder, var(--vscode-button-background));
+	padding-left: 10px;
+}
+
+.message.agent {
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+}
+
+.message-role {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	margin-bottom: 4px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.message-text {
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+}
+
+.message-status {
+	margin-top: 6px;
+	font-size: 0.8em;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
+
+.message-status:empty {
+	display: none;
+}
+
+.message-tools {
+	margin-top: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+	font-size: 0.85em;
+}
+
+.tool-line {
+	padding: 2px 6px;
+	border-radius: 3px;
+	background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+	color: var(--vscode-descriptionForeground);
+}
+
+.tool-line.tool-use {
+	color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground));
+}
+
+.tool-line.tool-result-error,
+.tool-line.tool-denied {
+	color: var(--vscode-errorForeground);
+}
+
+.message-error {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.message-error:empty {
+	display: none;
+}
+
+.error-block {
+	padding: 6px 8px;
+	border-radius: 3px;
+	border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+	background: var(--vscode-inputValidation-errorBackground, rgba(229, 72, 77, 0.08));
+	color: var(--vscode-foreground);
+	font-size: 0.9em;
+}
+
+.error-block.error-network,
+.error-block.error-rate_limit {
+	border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
+	background: var(--vscode-inputValidation-warningBackground, rgba(209, 154, 102, 0.08));
+}
+
+.error-label {
+	font-weight: 600;
+	margin-bottom: 2px;
+	color: var(--vscode-errorForeground);
+}
+
+.error-block.error-network .error-label,
+.error-block.error-rate_limit .error-label {
+	color: var(--vscode-editorWarning-foreground, var(--vscode-errorForeground));
+}
+
+.error-text {
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+	font-size: 0.9em;
+}
+
+.approval-card {
+	margin-top: 8px;
+	padding: 10px 12px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground, #d19a66));
+	background: var(--vscode-inputValidation-warningBackground, rgba(209, 154, 102, 0.08));
+}
+
+.approval-card.decided {
+	opacity: 0.7;
+}
+
+.approval-title {
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.approval-summary {
+	font-size: 0.9em;
+	margin-bottom: 6px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.approval-details {
+	margin: 0 0 8px 0;
+	font-size: 0.85em;
+}
+
+.approval-details > summary {
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	user-select: none;
+	padding: 2px 0;
+}
+
+.approval-details > summary:hover {
+	color: var(--vscode-foreground);
+}
+
+.approval-details-body {
+	margin: 4px 0 0 0;
+	padding: 6px 8px;
+	max-height: 160px;
+	overflow: auto;
+	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.08));
+	border-radius: 3px;
+	white-space: pre-wrap;
+}
+
+.approval-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.approval-btn {
+	padding: 4px 10px;
+	font-family: inherit;
+	font-size: 0.9em;
+	border-radius: 2px;
+	cursor: pointer;
+	border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.approval-btn.approve,
+.approval-btn.approve-session {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+.approval-btn.approve:hover,
+.approval-btn.approve-session:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.approval-btn.decline {
+	color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	border-color: var(--vscode-button-border, var(--vscode-widget-border, transparent));
+}
+
+.approval-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.approval-decision {
+	margin-top: 6px;
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.composer {
+	display: flex;
+	gap: 8px;
+	padding: 8px 12px 12px;
+	border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+	background: var(--vscode-sideBar-background);
+}
+
+.input {
+	flex: 1 1 auto;
+	resize: vertical;
+	min-height: 56px;
+	max-height: 40vh;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: inherit;
+	line-height: 1.4;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 2px;
+}
+
+.input:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.submit {
+	align-self: flex-end;
+	padding: 6px 14px;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 2px;
+	cursor: pointer;
+}
+
+.submit:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.submit:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
