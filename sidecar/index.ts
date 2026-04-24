@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto';
 import { Agent, type AgentTurnContext, type QueryFn } from './agent';
+import { ApprovalGate } from './harness/tools/approval';
 import { loadAnthropicApiKey } from './keychain';
 import type {
 	MessageSendParams,
@@ -25,22 +26,26 @@ import { RpcServer } from './rpc';
  * Responsibilities:
  *  - `ping` — liveness.
  *  - `message.send` — run a single turn against the Claude Agent SDK and
- *    stream `message.chunk` notifications back; request user approval for
- *    destructive tools via `tool.approval.request` notifications and wait
- *    for `tool.approval.reply`.
+ *    stream `message.chunk` notifications back; gate destructive tools
+ *    through the harness `ApprovalGate` and wait for
+ *    `tool.approval.reply` before the SDK proceeds (API-key auth only —
+ *    under OAuth the bundled CLI bypasses the SDK hook, and the gate's
+ *    belt-and-braces role carries over to the dispatcher's `invoke()`
+ *    path once tool execution routes through it).
  */
 export function main(): void {
 	const server = new RpcServer(process.stdin, process.stdout);
 	server.register<PingParams, PingResult>('ping', () => ({ timestamp: Date.now() }));
 
-	const agent = buildAgent(server, defaultSdkLoader);
+	const gate = buildApprovalGate(server);
+	const agent = buildAgent(server, gate, defaultSdkLoader);
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
 		params => agent.runTurn(params),
 	);
 	server.registerNotification<ToolApprovalReplyParams>(
 		'tool.approval.reply',
-		params => agent.handleApprovalReply(params),
+		params => gate.handleReply(params),
 	);
 
 	// Keep the process alive on stdout EPIPE when the parent goes away; Node
@@ -54,13 +59,28 @@ export function main(): void {
 }
 
 /**
- * Constructs an Agent wired to the given RPC server. The SDK loader is
- * injected so tests can substitute a fake; production supplies
- * `defaultSdkLoader` which dynamically imports `@anthropic-ai/claude-agent-sdk`
- * and reads the API key from Keychain (with an env-var fallback) on the
- * first turn.
+ * Harness-owned approval gate. Fires `tool.approval.request` at the
+ * webview and resolves on the matching reply. One gate per sidecar —
+ * approval state (`sessionApprovedTools`, pending prompts) is shared
+ * across the Claude adapter's SDK-level `canUseTool` hook today and
+ * across the dispatcher's `invoke()` path once tool execution routes
+ * through it.
  */
-export function buildAgent(server: RpcServer, sdkLoader: () => Promise<QueryFn>): Agent {
+export function buildApprovalGate(server: RpcServer): ApprovalGate {
+	return new ApprovalGate({
+		requestApproval: params => server.notify('tool.approval.request', params),
+		newApprovalId: () => randomUUID(),
+	});
+}
+
+/**
+ * Constructs an Agent wired to the given RPC server and approval gate.
+ * The SDK loader is injected so tests can substitute a fake; production
+ * supplies `defaultSdkLoader` which dynamically imports
+ * `@anthropic-ai/claude-agent-sdk` and reads the API key from Keychain
+ * (with an env-var fallback) on the first turn.
+ */
+export function buildAgent(server: RpcServer, gate: ApprovalGate, sdkLoader: () => Promise<QueryFn>): Agent {
 	let cached: AgentTurnContext | undefined;
 	return new Agent({
 		getTurnContext: async () => {
@@ -79,9 +99,8 @@ export function buildAgent(server: RpcServer, sdkLoader: () => Promise<QueryFn>)
 			return cached;
 		},
 		emitChunk: params => server.notify('message.chunk', params),
-		requestApproval: params => server.notify('tool.approval.request', params),
+		approvalGate: gate,
 		cwd: process.cwd(),
-		newApprovalId: () => randomUUID(),
 	});
 }
 
