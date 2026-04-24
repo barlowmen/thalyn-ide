@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken, Disposable, Uri, Webview, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
@@ -35,8 +35,7 @@ export class AgentPanelProvider implements WebviewViewProvider {
 		}
 		switch (message.type) {
 			case 'user.submit': {
-				// Day 2 stub: echo the submission back. Day 4 replaces this
-				// with a dispatch into the sidecar's message.send flow.
+				// Stub: echo the submission back. Sidecar dispatch comes next.
 				const reply: HostToWebviewMessage = {
 					type: 'echo.result',
 					correlationId: message.correlationId,

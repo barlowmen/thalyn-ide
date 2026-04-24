@@ -1,3 +1,8 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  See LICENSE in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 import { PassThrough } from 'stream';
 import { describe, expect, it } from 'vitest';
 import type { JsonRpcResponse } from './protocol';

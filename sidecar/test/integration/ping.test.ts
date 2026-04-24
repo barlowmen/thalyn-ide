@@ -1,3 +1,8 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Thalyn. All rights reserved.
+ *  See LICENSE in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
