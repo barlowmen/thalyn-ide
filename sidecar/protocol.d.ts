@@ -176,3 +176,52 @@ export interface ToolApprovalReplyParams {
 	/** Optional reason for `decline`; surfaced to the model via SDK deny message. */
 	readonly declineReason?: string;
 }
+
+// ---------------------------------------------------------------------------
+// `budget.approval.request` — sidecar → webview, asks the user to approve
+// continuing to spend in a category that has crossed its soft cap.
+//
+// Emitted from the `BudgetMeter` when `reserve()` would push cumulative
+// spend in `window` past the matching `<window>_soft_cap`. The approval
+// is per-category, per-session: once granted with `approve-for-session`
+// the meter stops prompting for that category until session end or until
+// the hard cap fires (hard caps ignore prior soft-cap approvals).
+// ---------------------------------------------------------------------------
+
+export type BudgetApprovalRequestMethod = 'budget.approval.request';
+
+/** The rolling window whose soft cap was crossed. */
+export type BudgetWindow = 'daily' | 'weekly';
+
+/** Cap unit for UI rendering. Mirrors `budgets.yaml`'s `unit` field. */
+export type BudgetUnit = 'usd' | 'gpu_seconds';
+
+export interface BudgetApprovalRequestParams {
+	/** Unique id minted per approval prompt. Must match on the reply. */
+	readonly correlationId: string;
+	/** Which category would overspend. */
+	readonly category: string;
+	/** Whether it's the daily or weekly soft cap that was crossed. */
+	readonly window: BudgetWindow;
+	/** Cap unit — `usd` or `gpu_seconds`. */
+	readonly unit: BudgetUnit;
+	/** Cumulative spend in `window` before this reservation. */
+	readonly currentSpend: number;
+	/** The reservation's estimate, in `unit`. */
+	readonly estimate: number;
+	/** The soft cap value that would be crossed. */
+	readonly softCap: number;
+	/** The matching hard cap for `window`; shown so the user can judge headroom. */
+	readonly hardCap: number;
+}
+
+// ---------------------------------------------------------------------------
+// `budget.approval.reply` — webview → sidecar. Notification (no response).
+// ---------------------------------------------------------------------------
+
+export type BudgetApprovalReplyMethod = 'budget.approval.reply';
+
+export interface BudgetApprovalReplyParams {
+	readonly correlationId: string;
+	readonly decision: ApprovalDecision;
+}
