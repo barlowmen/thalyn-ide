@@ -172,6 +172,64 @@ suite('SidecarClient', () => {
 		await assert.rejects(client.call('ping'), /not running/);
 	});
 
+	test('delivers inbound notifications (no id) to subscribers', async () => {
+		const fake = new FakeSidecar();
+		const client = new SidecarClient({ spawner: () => fake });
+		client.start();
+
+		const received: Array<{ correlationId: string; kind: string }> = [];
+		const sub = client.onNotification<{ correlationId: string; kind: string }>(
+			'message.chunk',
+			params => received.push(params),
+		);
+
+		fake.stdout.write(JSON.stringify({
+			jsonrpc: '2.0',
+			method: 'message.chunk',
+			params: { correlationId: 'c1', kind: 'text', text: 'hi' },
+		}) + '\n');
+		await flush();
+
+		assert.deepStrictEqual(received, [{ correlationId: 'c1', kind: 'text', text: 'hi' }]);
+
+		sub.dispose();
+		fake.stdout.write(JSON.stringify({
+			jsonrpc: '2.0',
+			method: 'message.chunk',
+			params: { correlationId: 'c2', kind: 'text', text: 'dropped' },
+		}) + '\n');
+		await flush();
+		assert.strictEqual(received.length, 1);
+
+		client.dispose();
+	});
+
+	test('notify() writes a JSON-RPC notification without an id', async () => {
+		const fake = new FakeSidecar();
+		const client = new SidecarClient({ spawner: () => fake });
+		client.start();
+
+		const captured = new Promise<{ jsonrpc: string; method: string; id?: unknown; params: unknown }>(resolve => {
+			let buffer = '';
+			fake.stdin.on('data', chunk => {
+				buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+				const idx = buffer.indexOf('\n');
+				if (idx >= 0) {
+					resolve(JSON.parse(buffer.slice(0, idx)));
+				}
+			});
+		});
+
+		client.notify('tool.approval.reply', { correlationId: 'a', decision: 'approve' });
+		const frame = await captured;
+		assert.strictEqual(frame.jsonrpc, '2.0');
+		assert.strictEqual(frame.method, 'tool.approval.reply');
+		assert.strictEqual(frame.id, undefined);
+		assert.deepStrictEqual(frame.params, { correlationId: 'a', decision: 'approve' });
+
+		client.dispose();
+	});
+
 	test('handles two responses arriving in a single stdout chunk', async () => {
 		const fake = new FakeSidecar();
 		const client = new SidecarClient({ spawner: () => fake });

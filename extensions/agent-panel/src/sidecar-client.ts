@@ -6,6 +6,7 @@
 import { spawn } from 'child_process';
 import type {
 	JsonRpcErrorResponse,
+	JsonRpcNotification,
 	JsonRpcRequest,
 	JsonRpcResponse,
 	JsonRpcSuccessResponse,
@@ -69,6 +70,12 @@ interface PendingCall {
 	reject(err: Error): void;
 }
 
+export type NotificationListener<TParams = unknown> = (params: TParams) => void;
+
+export interface NotificationSubscription {
+	dispose(): void;
+}
+
 /**
  * Client for the Thalyn sidecar. Owns the child-process lifecycle, frames
  * JSON-RPC 2.0 requests over stdio (newline-delimited JSON), and restarts
@@ -89,6 +96,7 @@ export class SidecarClient {
 	private stdoutBuffer = '';
 	private stderrBuffer = '';
 	private readonly pending = new Map<number, PendingCall>();
+	private readonly notificationListeners = new Map<string, Set<NotificationListener>>();
 	private nextRequestId = 1;
 	private restartAttempts = 0;
 	private disposed = false;
@@ -149,6 +157,47 @@ export class SidecarClient {
 			});
 			this.child!.stdin!.write(JSON.stringify(request) + '\n');
 		});
+	}
+
+	/**
+	 * Fire-and-forget notification to the sidecar. Used for message types
+	 * that never expect a response (e.g. `tool.approval.reply`). Unlike
+	 * `call()`, this does not wait for an ack, does not throw if the
+	 * sidecar is stopped (the message is silently dropped), and does not
+	 * consume a request id.
+	 */
+	notify<TParams>(method: string, params: TParams): void {
+		if (this.disposed || !this.child || !this.child.stdin) {
+			return;
+		}
+		const message: JsonRpcNotification<TParams> = { jsonrpc: '2.0', method, params };
+		this.child.stdin.write(JSON.stringify(message) + '\n');
+	}
+
+	/**
+	 * Subscribe to notifications the sidecar pushes out of band
+	 * (e.g. `message.chunk`, `tool.approval.request`). Returns a disposable
+	 * that removes the listener; multiple listeners per method are allowed.
+	 */
+	onNotification<TParams>(method: string, listener: NotificationListener<TParams>): NotificationSubscription {
+		let set = this.notificationListeners.get(method);
+		if (!set) {
+			set = new Set();
+			this.notificationListeners.set(method, set);
+		}
+		set.add(listener as NotificationListener);
+		return {
+			dispose: () => {
+				const current = this.notificationListeners.get(method);
+				if (!current) {
+					return;
+				}
+				current.delete(listener as NotificationListener);
+				if (current.size === 0) {
+					this.notificationListeners.delete(method);
+				}
+			},
+		};
 	}
 
 	/** Stop the sidecar and release resources. Further calls reject. */
@@ -223,15 +272,18 @@ export class SidecarClient {
 	}
 
 	private handleResponseLine(line: string): void {
-		let parsed: JsonRpcResponse;
+		let parsed: JsonRpcResponse | JsonRpcNotification;
 		try {
-			parsed = JSON.parse(line) as JsonRpcResponse;
+			parsed = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification;
 		} catch {
 			this.onStderr(`sidecar sent non-JSON line: ${line}`);
 			return;
 		}
+		if (isNotificationMessage(parsed)) {
+			this.dispatchNotification(parsed);
+			return;
+		}
 		if (typeof parsed.id !== 'number') {
-			// Notifications (no id) aren't part of this protocol surface; ignore.
 			return;
 		}
 		const pending = this.pending.get(parsed.id);
@@ -243,6 +295,20 @@ export class SidecarClient {
 			pending.reject(new SidecarRpcError(pending.method, parsed.error.code, parsed.error.message));
 		} else {
 			pending.resolve((parsed as JsonRpcSuccessResponse).result);
+		}
+	}
+
+	private dispatchNotification(notification: JsonRpcNotification): void {
+		const listeners = this.notificationListeners.get(notification.method);
+		if (!listeners || listeners.size === 0) {
+			return;
+		}
+		for (const listener of listeners) {
+			try {
+				listener(notification.params);
+			} catch (err) {
+				this.onStderr(`notification listener for ${notification.method} threw: ${(err as Error).message}`);
+			}
 		}
 	}
 
@@ -308,4 +374,9 @@ export class SidecarRpcError extends Error {
 
 function isErrorResponse(response: JsonRpcResponse): response is JsonRpcErrorResponse {
 	return 'error' in response;
+}
+
+function isNotificationMessage(value: JsonRpcResponse | JsonRpcNotification): value is JsonRpcNotification {
+	return typeof (value as JsonRpcNotification).method === 'string'
+		&& (value as Partial<JsonRpcResponse>).id === undefined;
 }

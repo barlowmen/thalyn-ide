@@ -4,12 +4,31 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken, Disposable, Uri, Webview, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
-import { HostToWebviewMessage, WebviewToHostMessage } from './protocol';
+import type {
+	MessageChunkParams,
+	MessageSendParams,
+	MessageSendResult,
+	ToolApprovalRequestParams,
+	ToolApprovalReplyParams,
+} from '../../../sidecar/protocol';
+import type { HostToWebviewMessage, WebviewToHostMessage } from './protocol';
+import type { NotificationSubscription, SidecarClient } from './sidecar-client';
 
+/**
+ * Bridges the chat webview and the sidecar over the extension host.
+ *
+ * The webview speaks a small discriminated-union protocol (see `protocol.ts`);
+ * the sidecar speaks JSON-RPC. This provider owns the fan-out / fan-in
+ * translation between the two so the approval round-trip, streaming chunks,
+ * and completion events all correlate by `correlationId`.
+ */
 export class AgentPanelProvider implements WebviewViewProvider {
 	public static readonly viewType = 'agentPanel.chat';
 
-	constructor(private readonly extensionUri: Uri) { }
+	constructor(
+		private readonly extensionUri: Uri,
+		private readonly sidecarProvider: () => SidecarClient | undefined,
+	) { }
 
 	resolveWebviewView(
 		webviewView: WebviewView,
@@ -23,28 +42,121 @@ export class AgentPanelProvider implements WebviewViewProvider {
 		};
 		webviewView.webview.html = this.renderHtml(webviewView.webview, mediaRoot);
 
-		const subscription: Disposable = webviewView.webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
-			this.handleMessage(webviewView.webview, message);
+		const subscriptions: Disposable[] = [];
+
+		subscriptions.push(webviewView.webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
+			this.handleMessageFromWebview(webviewView.webview, message);
+		}));
+
+		const sidecar = this.sidecarProvider();
+		if (sidecar) {
+			subscriptions.push(disposableFor(sidecar.onNotification<MessageChunkParams>(
+				'message.chunk',
+				params => this.onChunk(webviewView.webview, params),
+			)));
+			subscriptions.push(disposableFor(sidecar.onNotification<ToolApprovalRequestParams>(
+				'tool.approval.request',
+				params => this.onApprovalRequest(webviewView.webview, params),
+			)));
+		}
+
+		webviewView.onDidDispose(() => {
+			for (const sub of subscriptions) {
+				sub.dispose();
+			}
 		});
-		webviewView.onDidDispose(() => subscription.dispose());
 	}
 
-	private handleMessage(webview: Webview, message: WebviewToHostMessage): void {
+	private handleMessageFromWebview(webview: Webview, message: WebviewToHostMessage): void {
 		if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
 			return;
 		}
+		const sidecar = this.sidecarProvider();
 		switch (message.type) {
 			case 'user.submit': {
-				// Echo the submission back to the webview.
-				const reply: HostToWebviewMessage = {
-					type: 'echo.result',
+				if (!sidecar) {
+					const reply: HostToWebviewMessage = {
+						type: 'message.complete',
+						correlationId: message.correlationId,
+						subtype: 'error',
+						errorKind: 'unknown',
+						errorMessage: 'Sidecar is not running.',
+					};
+					void webview.postMessage(reply);
+					return;
+				}
+				const params: MessageSendParams = {
 					correlationId: message.correlationId,
-					text: message.text
+					text: message.text,
 				};
-				void webview.postMessage(reply);
+				sidecar.call<MessageSendResult, MessageSendParams>('message.send', params)
+					.then(result => {
+						const reply: HostToWebviewMessage = {
+							type: 'message.complete',
+							correlationId: result.correlationId,
+							subtype: result.subtype,
+							errorKind: result.errorKind,
+							errorMessage: result.errorMessage,
+						};
+						void webview.postMessage(reply);
+					})
+					.catch((err: Error) => {
+						const reply: HostToWebviewMessage = {
+							type: 'message.complete',
+							correlationId: message.correlationId,
+							subtype: 'error',
+							errorKind: 'unknown',
+							errorMessage: err.message,
+						};
+						void webview.postMessage(reply);
+					});
+				return;
+			}
+			case 'tool.approval.reply': {
+				if (!sidecar) {
+					return;
+				}
+				const reply: ToolApprovalReplyParams = {
+					correlationId: message.correlationId,
+					decision: message.decision,
+					declineReason: message.declineReason,
+				};
+				sidecar.notify('tool.approval.reply', reply);
 				return;
 			}
 		}
+	}
+
+	private onChunk(webview: Webview, params: MessageChunkParams): void {
+		const host: HostToWebviewMessage = {
+			type: 'message.chunk',
+			correlationId: params.correlationId,
+			kind: params.kind,
+			text: params.text,
+			toolName: params.toolName,
+			toolUseId: params.toolUseId,
+			toolInput: params.toolInput,
+			toolSummary: params.toolSummary,
+			toolResult: params.toolResult,
+			toolIsError: params.toolIsError,
+			errorKind: params.errorKind,
+			errorMessage: params.errorMessage,
+		};
+		void webview.postMessage(host);
+	}
+
+	private onApprovalRequest(webview: Webview, params: ToolApprovalRequestParams): void {
+		const host: HostToWebviewMessage = {
+			type: 'tool.approval.request',
+			correlationId: params.correlationId,
+			turnCorrelationId: params.turnCorrelationId,
+			toolName: params.toolName,
+			toolTier: params.toolTier,
+			toolUseId: params.toolUseId,
+			summary: params.summary,
+			input: params.input,
+		};
+		void webview.postMessage(host);
 	}
 
 	private renderHtml(webview: Webview, mediaRoot: Uri): string {
@@ -78,6 +190,10 @@ export class AgentPanelProvider implements WebviewViewProvider {
 </body>
 </html>`;
 	}
+}
+
+function disposableFor(sub: NotificationSubscription): Disposable {
+	return { dispose: () => sub.dispose() };
 }
 
 function generateNonce(): string {

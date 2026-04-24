@@ -40,7 +40,8 @@
   },
   "scripts": {
     "compile": "gulp compile-extension:agent-panel",
-    "watch": "gulp watch-extension:agent-panel"
+    "watch": "gulp watch-extension:agent-panel",
+    "test": "mocha out/**/*.test.js --ui tdd --reporter spec"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
