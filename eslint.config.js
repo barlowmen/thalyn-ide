@@ -126,8 +126,8 @@ export default tseslint.config(
 				'block',
 				[
 					'---------------------------------------------------------------------------------------------',
-					' *  Copyright (c) Microsoft Corporation. All rights reserved.',
-					' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+					{ pattern: ' \\*  Copyright \\(c\\) (?:Microsoft Corporation|Thalyn)\\. All rights reserved\\.' },
+					{ pattern: ' \\*  (?:Licensed under the MIT License\\. See License\\.txt|See LICENSE) in the project root for license information\\.' },
 					' *--------------------------------------------------------------------------------------------'
 				]
 			]
