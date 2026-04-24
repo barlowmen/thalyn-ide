@@ -26,8 +26,8 @@ version: 1
 
 categories:
   # -- Subagent workers --
-  # Opus is the default worker model per CLAUDE.md. Assume ~50k input +
-  # 5k output tokens per worker call at $15/$75 per MTok = ~$1.13/call.
+  # Opus is the default worker model. Assume ~50k input + 5k output
+  # tokens per worker call at $15/$75 per MTok = ~$1.13/call.
   # 20-30 spawns on a heavy day ~ $30.
   subagent_opus:
     unit: usd
@@ -47,8 +47,8 @@ categories:
     weekly_soft_cap: 60.00
     weekly_hard_cap: 120.00
 
-  # CLAUDE.md: "Do not use Haiku." Caps at 0 make any accidental
-  # wire-up a hard-block at reserve().
+  # Haiku is not in use; caps at 0 make any accidental wire-up a
+  # hard-block at reserve().
   subagent_haiku:
     unit: usd
     per_call_cap: 0.00
