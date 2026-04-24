@@ -1,0 +1,27 @@
+# Worker role overrides.
+#
+# Each key under `roles` matches a registered role id. Fields are
+# optional; anything omitted falls back to the registered default from
+# `sidecar/harness/workers/roles/<id>.ts`. Fields that are present
+# replace the registered default wholesale (allowlists are replaced,
+# not deep-merged).
+#
+# Built-in roles register with these defaults:
+#   researcher:  model=opus, allowlist=[read_file, grep]
+#   implementer: model=opus, allowlist=[read_file, grep, write_file, edit_file]
+#   reviewer:    model=opus, allowlist=[read_file, grep]
+#   tester:      model=opus, allowlist=[read_file, grep, run_command]
+#
+# To downshift a role to a cheaper model or tighten its allowlist,
+# uncomment the relevant block and edit. Reload takes effect at next
+# dispatcher construction (session start).
+
+roles: {}
+
+# Example:
+# roles:
+#   researcher:
+#     model: sonnet
+#     allowlist:
+#       - read_file
+#       - grep
