@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, Uri, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
+import { CancellationToken, Disposable, Uri, Webview, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
+import { HostToWebviewMessage, WebviewToHostMessage } from './protocol';
 
 export class AgentPanelProvider implements WebviewViewProvider {
 	public static readonly viewType = 'agentPanel.chat';
@@ -15,42 +16,76 @@ export class AgentPanelProvider implements WebviewViewProvider {
 		_context: WebviewViewResolveContext,
 		_token: CancellationToken
 	): void {
+		const mediaRoot = Uri.joinPath(this.extensionUri, 'media');
 		webviewView.webview.options = {
 			enableScripts: true,
-			localResourceRoots: [this.extensionUri]
+			localResourceRoots: [mediaRoot]
 		};
-		webviewView.webview.html = this.getPlaceholderHtml();
+		webviewView.webview.html = this.renderHtml(webviewView.webview, mediaRoot);
+
+		const subscription: Disposable = webviewView.webview.onDidReceiveMessage((message: WebviewToHostMessage) => {
+			this.handleMessage(webviewView.webview, message);
+		});
+		webviewView.onDidDispose(() => subscription.dispose());
 	}
 
-	private getPlaceholderHtml(): string {
+	private handleMessage(webview: Webview, message: WebviewToHostMessage): void {
+		if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
+			return;
+		}
+		switch (message.type) {
+			case 'user.submit': {
+				// Day 2 stub: echo the submission back. Day 4 replaces this
+				// with a dispatch into the sidecar's message.send flow.
+				const reply: HostToWebviewMessage = {
+					type: 'echo.result',
+					correlationId: message.correlationId,
+					text: message.text
+				};
+				void webview.postMessage(reply);
+				return;
+			}
+		}
+	}
+
+	private renderHtml(webview: Webview, mediaRoot: Uri): string {
+		const styleUri = webview.asWebviewUri(Uri.joinPath(mediaRoot, 'chat.css'));
+		const scriptUri = webview.asWebviewUri(Uri.joinPath(mediaRoot, 'chat.js'));
+		const nonce = generateNonce();
 		return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+	<meta http-equiv="Content-Security-Policy"
+		content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="stylesheet" href="${styleUri}">
 	<title>Thalyn Agent</title>
-	<style>
-		body {
-			font-family: var(--vscode-font-family);
-			color: var(--vscode-foreground);
-			padding: 12px;
-		}
-		h2 {
-			font-size: 1.1em;
-			margin: 0 0 8px 0;
-		}
-		p {
-			margin: 0;
-			color: var(--vscode-descriptionForeground);
-			font-size: 0.9em;
-		}
-	</style>
 </head>
 <body>
-	<h2>Thalyn Agent</h2>
-	<p>Placeholder panel. Day 2 brings the chat UI; Day 4 wires up Claude.</p>
+	<div class="chat">
+		<ul id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></ul>
+		<form id="composer" class="composer">
+			<textarea
+				id="input"
+				class="input"
+				rows="2"
+				placeholder="Message the agent&#8230;"
+				aria-label="Message the agent"></textarea>
+			<button type="submit" id="submit" class="submit">Send</button>
+		</form>
+	</div>
+	<script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
 	}
+}
+
+function generateNonce(): string {
+	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+	let result = '';
+	for (let i = 0; i < 32; i++) {
+		result += chars.charAt(Math.floor(Math.random() * chars.length));
+	}
+	return result;
 }

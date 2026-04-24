@@ -1,0 +1,107 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+html, body {
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	color: var(--vscode-foreground);
+	background: var(--vscode-sideBar-background);
+}
+
+.chat {
+	display: flex;
+	flex-direction: column;
+	height: 100vh;
+	box-sizing: border-box;
+}
+
+.messages {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	list-style: none;
+	margin: 0;
+	padding: 12px;
+}
+
+.message {
+	margin-bottom: 12px;
+	padding: 8px 10px;
+	border-radius: 4px;
+	line-height: 1.4;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+}
+
+.message.user {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+}
+
+.message.echo {
+	background: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+}
+
+.message-role {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	margin-bottom: 4px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.message-text {
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+}
+
+.composer {
+	display: flex;
+	gap: 8px;
+	padding: 8px 12px 12px;
+	border-top: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
+	background: var(--vscode-sideBar-background);
+}
+
+.input {
+	flex: 1 1 auto;
+	resize: none;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 2px;
+}
+
+.input:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.submit {
+	align-self: flex-end;
+	padding: 6px 14px;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 2px;
+	cursor: pointer;
+}
+
+.submit:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.submit:disabled {
+	opacity: 0.5;
+	cursor: default;
+}

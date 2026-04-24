@@ -9,7 +9,9 @@ import { AgentPanelProvider } from './agent-panel';
 export function activate(context: ExtensionContext): void {
 	const provider = new AgentPanelProvider(context.extensionUri);
 	context.subscriptions.push(
-		window.registerWebviewViewProvider(AgentPanelProvider.viewType, provider)
+		window.registerWebviewViewProvider(AgentPanelProvider.viewType, provider, {
+			webviewOptions: { retainContextWhenHidden: true }
+		})
 	);
 }
 
