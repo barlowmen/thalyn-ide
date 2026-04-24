@@ -3,8 +3,17 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { BrainStreamEvent } from '../brain/types';
+import { DEFAULT_RETRY_POLICY, type RetryPolicy, withRetry } from '../brain/retry';
+import type {
+	BrainError,
+	BrainMessage,
+	BrainRequest,
+	BrainStreamEvent,
+	BrainToolUseContent,
+	CentralBrain,
+} from '../brain/types';
 import type { ToolDispatcher } from '../tools/dispatcher';
+import type { ToolSchema } from '../tools/types';
 import type {
 	CentralBrainFactory,
 	EffectiveRole,
@@ -97,14 +106,16 @@ export class WorkerDispatcher {
 	}
 
 	/**
-	 * Spawn a worker. Returns a `WorkerHandle` immediately; the worker
+	 * Spawn a worker. Returns a `WorkerHandle` synchronously; the worker
 	 * begins execution on the next microtask tick. Parallel spawning is
 	 * supported by construction — each call builds its own isolated
-	 * `CentralBrain` and its own handle.
+	 * `CentralBrain` and its own handle, sharing only the parent's
+	 * `ToolDispatcher` (so approvals route to one user) and the
+	 * observability pipeline.
 	 *
-	 * TODO: implement the in-process worker loop, tool-allowlist
-	 * filtering, context transcript assembly, retry wrapping, and
-	 * cancellation propagation.
+	 * Validation failures (unknown role, unresolved allowlist tool) are
+	 * raised synchronously from this call so the caller learns about
+	 * them before a handle gets into the wild.
 	 */
 	spawn(
 		role: string,
@@ -113,12 +124,39 @@ export class WorkerDispatcher {
 		options?: SpawnOptions,
 	): WorkerHandle {
 		const effective = this.effectiveRole(role);
-		void effective;
-		void task;
-		void context;
-		void options;
-		void this.deps;
-		throw new Error('WorkerDispatcher.spawn is not implemented yet.');
+		const model = options?.model ?? effective.model;
+		const tools = this.resolveAllowlist(effective);
+
+		const system = effective.systemPromptTemplate(task);
+		const messages: readonly BrainMessage[] = [
+			...context,
+			{ role: 'user', content: [{ type: 'text', text: task }] },
+		];
+
+		const rawBrain = this.deps.brainFactory.create({ model });
+		const retry = resolveRetryPolicy(effective.retry, options?.retry);
+		const brain = retry === false ? rawBrain : withRetry(rawBrain, retry);
+
+		return new WorkerRun({
+			role: effective.id,
+			brain,
+			request: { system, messages, tools },
+			parentSignal: options?.signal,
+		});
+	}
+
+	private resolveAllowlist(effective: EffectiveRole): ToolSchema[] {
+		const resolved: ToolSchema[] = [];
+		for (const name of effective.allowlist) {
+			const schema = this.deps.tools.schemaFor(name);
+			if (!schema) {
+				throw new Error(
+					`Role '${effective.id}' allowlist references unknown tool: ${name}`,
+				);
+			}
+			resolved.push(schema);
+		}
+		return resolved;
 	}
 }
 
@@ -138,7 +176,7 @@ export interface WorkerDispatcherDeps {
 	 * (and therefore the approval gate); the worker loop filters
 	 * schemas down to the effective role's allowlist.
 	 */
-	readonly tools: ToolDispatcher;
+	readonly tools: Pick<ToolDispatcher, 'schemaFor'>;
 }
 
 /**
@@ -159,3 +197,131 @@ export async function drainWorker(handle: WorkerHandle): Promise<WorkerResult> {
  * public surface don't also need to import `brain/types`.
  */
 export type { BrainStreamEvent };
+
+function resolveRetryPolicy(
+	roleRetry: RetryPolicy | false | undefined,
+	spawnRetry: RetryPolicy | false | undefined,
+): RetryPolicy | false {
+	if (spawnRetry !== undefined) {
+		return spawnRetry;
+	}
+	if (roleRetry !== undefined) {
+		return roleRetry;
+	}
+	return DEFAULT_RETRY_POLICY;
+}
+
+interface WorkerRunInit {
+	readonly role: string;
+	readonly brain: CentralBrain;
+	readonly request: Omit<BrainRequest, 'signal'>;
+	readonly parentSignal?: AbortSignal;
+}
+
+/**
+ * In-process worker execution. Constructed by `WorkerDispatcher.spawn`;
+ * starts the brain turn on the next microtask so parallel `spawn` calls
+ * are not serialised. Implements `WorkerHandle` so callers can stream
+ * events, await the aggregated terminal result, or both against the
+ * same handle.
+ */
+class WorkerRun implements WorkerHandle {
+	readonly role: string;
+	readonly result: Promise<WorkerResult>;
+
+	private readonly controller = new AbortController();
+	private readonly buffered: BrainStreamEvent[] = [];
+	private readonly waiters: Array<(ev: IteratorResult<BrainStreamEvent>) => void> = [];
+	private finished = false;
+	private parentSignal?: AbortSignal;
+	private parentAbortListener?: () => void;
+
+	constructor(init: WorkerRunInit) {
+		this.role = init.role;
+		if (init.parentSignal) {
+			if (init.parentSignal.aborted) {
+				this.controller.abort();
+			} else {
+				const listener = () => this.controller.abort();
+				init.parentSignal.addEventListener('abort', listener, { once: true });
+				this.parentSignal = init.parentSignal;
+				this.parentAbortListener = listener;
+			}
+		}
+		this.result = this.run(init.brain, init.request);
+	}
+
+	cancel(): void {
+		this.controller.abort();
+	}
+
+	[Symbol.asyncIterator](): AsyncIterator<BrainStreamEvent> {
+		return {
+			next: (): Promise<IteratorResult<BrainStreamEvent>> => {
+				if (this.buffered.length > 0) {
+					return Promise.resolve({ value: this.buffered.shift()!, done: false });
+				}
+				if (this.finished) {
+					return Promise.resolve({ value: undefined, done: true });
+				}
+				return new Promise(resolve => this.waiters.push(resolve));
+			},
+		};
+	}
+
+	private async run(
+		brain: CentralBrain,
+		request: Omit<BrainRequest, 'signal'>,
+	): Promise<WorkerResult> {
+		let text = '';
+		const toolCalls: BrainToolUseContent[] = [];
+		let stopReason: string | undefined;
+		let error: BrainError | undefined;
+
+		try {
+			for await (const ev of brain.send({ ...request, signal: this.controller.signal })) {
+				this.emit(ev);
+				switch (ev.kind) {
+					case 'text':
+						text += ev.text;
+						break;
+					case 'tool_use':
+						toolCalls.push({ type: 'tool_use', ...ev.call });
+						break;
+					case 'done':
+						stopReason = ev.stopReason;
+						break;
+					case 'error':
+						error = ev.error;
+						break;
+				}
+			}
+		} finally {
+			this.finish();
+		}
+
+		return { text, toolCalls, stopReason, error };
+	}
+
+	private emit(ev: BrainStreamEvent): void {
+		const waiter = this.waiters.shift();
+		if (waiter) {
+			waiter({ value: ev, done: false });
+		} else {
+			this.buffered.push(ev);
+		}
+	}
+
+	private finish(): void {
+		this.finished = true;
+		if (this.parentSignal && this.parentAbortListener) {
+			this.parentSignal.removeEventListener('abort', this.parentAbortListener);
+			this.parentSignal = undefined;
+			this.parentAbortListener = undefined;
+		}
+		while (this.waiters.length > 0) {
+			const waiter = this.waiters.shift()!;
+			waiter({ value: undefined, done: true });
+		}
+	}
+}
