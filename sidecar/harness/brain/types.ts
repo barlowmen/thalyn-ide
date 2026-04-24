@@ -17,9 +17,8 @@ import type { ToolCall, ToolResult, ToolSchema } from '../tools/types';
  * brain's job is: turn a request into a stream of text and tool calls,
  * and surface errors. Everything else is the harness's.
  *
- * See `.claude/adrs/0003-central-brain-interface.md` for the full design
- * rationale, including what is intentionally absent from the interface
- * and why.
+ * The full rationale for what is and is not in this interface — and the
+ * narrowness of the contract — is captured in ADR 0003.
  */
 export interface CentralBrain {
 	/**
