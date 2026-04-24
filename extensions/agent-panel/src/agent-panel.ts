@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Thalyn. All rights reserved.
- *  See LICENSE in the project root for license information.
+ *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken, Disposable, Uri, Webview, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
@@ -35,7 +35,7 @@ export class AgentPanelProvider implements WebviewViewProvider {
 		}
 		switch (message.type) {
 			case 'user.submit': {
-				// Stub: echo the submission back. Sidecar dispatch comes next.
+				// Echo the submission back to the webview.
 				const reply: HostToWebviewMessage = {
 					type: 'echo.result',
 					correlationId: message.correlationId,
