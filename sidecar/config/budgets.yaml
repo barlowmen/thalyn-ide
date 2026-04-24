@@ -1,0 +1,144 @@
+# Thalyn budget subsystem — per-category caps.
+#
+# Every cost-bearing operation registers a category here. The harness's
+# BudgetMeter checks per-call, daily, and weekly caps at reserve() and
+# enforces hard blocks or soft-cap approval flows.
+#
+# Units:
+#   - `usd` for LLM and paid-API categories.
+#   - `gpu_seconds` for local inference. Caps are denominated in the
+#     category's unit; the two are never mixed.
+#
+# Cap semantics:
+#   - `per_call_cap` rejects any single invocation whose estimate
+#     exceeds the cap. Always hard.
+#   - `daily_soft_cap` / `weekly_soft_cap` prompt the user for
+#     approval when crossing the threshold; approval can be granted
+#     for the session.
+#   - `daily_hard_cap` / `weekly_hard_cap` block. Prior soft-cap
+#     approvals do not survive a hard cap.
+#
+# Calibration target: a comfortable heavy day. Weekly is ~6x daily
+# (one rest day per week, per the project playbook). Adjust after a
+# week of real use; the file is hot-edited between sessions.
+
+version: 1
+
+categories:
+  # -- Subagent workers --
+  # Opus is the default worker model per CLAUDE.md. Assume ~50k input +
+  # 5k output tokens per worker call at $15/$75 per MTok = ~$1.13/call.
+  # 20-30 spawns on a heavy day ~ $30.
+  subagent_opus:
+    unit: usd
+    per_call_cap: 5.00
+    daily_soft_cap: 30.00
+    daily_hard_cap: 60.00
+    weekly_soft_cap: 180.00
+    weekly_hard_cap: 360.00
+
+  # Sonnet fires only when a role is downshifted in workers.yaml.
+  # No role currently overrides; budget exists for experimentation.
+  subagent_sonnet:
+    unit: usd
+    per_call_cap: 2.00
+    daily_soft_cap: 10.00
+    daily_hard_cap: 20.00
+    weekly_soft_cap: 60.00
+    weekly_hard_cap: 120.00
+
+  # CLAUDE.md: "Do not use Haiku." Caps at 0 make any accidental
+  # wire-up a hard-block at reserve().
+  subagent_haiku:
+    unit: usd
+    per_call_cap: 0.00
+    daily_soft_cap: 0.00
+    daily_hard_cap: 0.00
+    weekly_soft_cap: 0.00
+    weekly_hard_cap: 0.00
+
+  # -- Agent-driven browser loop --
+  # Each loop turn = one Opus call on a page digest (~$0.30-$0.50).
+  # 30 loops/day typical; 60 on a heavy research day.
+  browser_loop:
+    unit: usd
+    per_call_cap: 0.50
+    daily_soft_cap: 15.00
+    daily_hard_cap: 30.00
+    weekly_soft_cap: 90.00
+    weekly_hard_cap: 180.00
+
+  # -- Multi-provider workers --
+  # Gemini / Grok are supplementary, not primary spend.
+  gemini:
+    unit: usd
+    per_call_cap: 1.00
+    daily_soft_cap: 5.00
+    daily_hard_cap: 10.00
+    weekly_soft_cap: 30.00
+    weekly_hard_cap: 60.00
+
+  grok:
+    unit: usd
+    per_call_cap: 1.00
+    daily_soft_cap: 5.00
+    daily_hard_cap: 10.00
+    weekly_soft_cap: 30.00
+    weekly_hard_cap: 60.00
+
+  # -- Paid search --
+  # Brave: ~$0.003/query on Pro. Per-call 0.05 = batched; daily $1 = ~300 queries.
+  search_brave:
+    unit: usd
+    per_call_cap: 0.05
+    daily_soft_cap: 1.00
+    daily_hard_cap: 2.00
+    weekly_soft_cap: 5.00
+    weekly_hard_cap: 10.00
+
+  # Perplexity Sonar: ~$0.05-$0.20/request with token pricing.
+  # Daily $3 = 15-60 requests depending on context length.
+  search_perplexity:
+    unit: usd
+    per_call_cap: 0.20
+    daily_soft_cap: 3.00
+    daily_hard_cap: 6.00
+    weekly_soft_cap: 15.00
+    weekly_hard_cap: 30.00
+
+  # -- Voice --
+  # ElevenLabs: ~$0.30 per 1000 chars. $0.50/call ~ 1600 chars.
+  # Daily $2 covers a few summaries read aloud.
+  elevenlabs_tts:
+    unit: usd
+    per_call_cap: 0.50
+    daily_soft_cap: 2.00
+    daily_hard_cap: 5.00
+    weekly_soft_cap: 12.00
+    weekly_hard_cap: 25.00
+
+  # -- Document generation --
+  # Covers the LLM fee for long-form document generation.
+  # Single large doc up to ~$3; a handful per day.
+  document_gen:
+    unit: usd
+    per_call_cap: 3.00
+    daily_soft_cap: 10.00
+    daily_hard_cap: 20.00
+    weekly_soft_cap: 60.00
+    weekly_hard_cap: 120.00
+
+  # -- Local inference (Llama 3.3 70B on Apple Silicon) --
+  # Metered in GPU-seconds, not USD: marginal cost is electricity,
+  # which varies too much to honestly average to dollars. Caps here
+  # govern battery / thermal envelope, not spend.
+  # per_call 300s = 5 min single generation.
+  # daily_hard 28800s = 8 hours (a full workday of local inference).
+  # weekly_hard 172800s = 48 hours (caps runaway background usage).
+  local_inference:
+    unit: gpu_seconds
+    per_call_cap: 300
+    daily_soft_cap: 14400
+    daily_hard_cap: 28800
+    weekly_soft_cap: 86400
+    weekly_hard_cap: 172800
