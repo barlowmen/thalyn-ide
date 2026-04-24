@@ -42,7 +42,7 @@ html, body {
 	color: var(--vscode-input-foreground);
 }
 
-.message.echo {
+.message.agent {
 	background: var(--vscode-editorWidget-background);
 	color: var(--vscode-editorWidget-foreground);
 	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border));
@@ -58,6 +58,120 @@ html, body {
 
 .message-text {
 	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+}
+
+.message-status {
+	margin-top: 6px;
+	font-size: 0.8em;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+}
+
+.message-status:empty {
+	display: none;
+}
+
+.message-tools {
+	margin-top: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+	font-size: 0.85em;
+}
+
+.tool-line {
+	padding: 2px 6px;
+	border-radius: 3px;
+	background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+	color: var(--vscode-descriptionForeground);
+}
+
+.tool-line.tool-use {
+	color: var(--vscode-symbolIcon-functionForeground, var(--vscode-foreground));
+}
+
+.tool-line.tool-result-error,
+.tool-line.tool-denied,
+.tool-line.tool-error {
+	color: var(--vscode-errorForeground);
+}
+
+.approval-card {
+	margin-top: 8px;
+	padding: 10px 12px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground, #d19a66));
+	background: var(--vscode-inputValidation-warningBackground, rgba(209, 154, 102, 0.08));
+}
+
+.approval-card.decided {
+	opacity: 0.7;
+}
+
+.approval-title {
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.approval-summary {
+	font-size: 0.9em;
+	margin-bottom: 6px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.approval-details {
+	margin: 0 0 8px 0;
+	padding: 6px 8px;
+	max-height: 160px;
+	overflow: auto;
+	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.08));
+	border-radius: 3px;
+	font-size: 0.85em;
+	white-space: pre-wrap;
+}
+
+.approval-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.approval-btn {
+	padding: 4px 10px;
+	font-family: inherit;
+	font-size: 0.9em;
+	border-radius: 2px;
+	cursor: pointer;
+	border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.approval-btn.approve,
+.approval-btn.approve-session {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+}
+
+.approval-btn.approve:hover,
+.approval-btn.approve-session:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.approval-btn.decline {
+	color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	border-color: var(--vscode-button-border, var(--vscode-widget-border, transparent));
+}
+
+.approval-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.approval-decision {
+	margin-top: 6px;
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
 }
 
 .composer {
