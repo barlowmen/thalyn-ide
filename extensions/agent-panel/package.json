@@ -1,6 +1,6 @@
 {
   "name": "agent-panel",
-  "displayName": "Agent Panel",
+  "displayName": "Thalyn",
   "description": "Thalyn agent chat panel.",
   "version": "0.0.1",
   "publisher": "vscode",
@@ -23,7 +23,7 @@
       "activitybar": [
         {
           "id": "agent-panel",
-          "title": "Agent",
+          "title": "Thalyn",
           "icon": "$(comment-discussion)"
         }
       ]
@@ -33,7 +33,7 @@
         {
           "type": "webview",
           "id": "agentPanel.chat",
-          "name": "Agent"
+          "name": "Thalyn"
         }
       ]
     }

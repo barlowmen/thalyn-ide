@@ -37,7 +37,7 @@
 		li.className = 'message ' + role;
 		const roleEl = document.createElement('div');
 		roleEl.className = 'message-role';
-		roleEl.textContent = role === 'user' ? 'You' : role === 'agent' ? 'Agent' : role;
+		roleEl.textContent = role === 'user' ? 'You' : role === 'agent' ? 'Thalyn' : role;
 		li.appendChild(roleEl);
 		return li;
 	}
