@@ -29,9 +29,9 @@ import type {
  * belt-and-braces.
  *
  * Approval state (`sessionApprovedTools`, `pendingApprovals`) lives on
- * the gate so it is shared across adapter rebuilds and, in Phase 3
- * Day 9, can be surfaced to `sidecar/harness/persistence.ts` for
- * cross-restart preservation.
+ * the gate so it is shared across adapter rebuilds. State is in-memory
+ * only — cross-restart preservation is not yet implemented and will
+ * plug in once session persistence exists.
  */
 export class ApprovalGate {
 	private readonly pendingApprovals = new Map<string, PendingApproval>();

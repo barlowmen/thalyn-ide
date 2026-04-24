@@ -19,10 +19,9 @@ import type {
  * approval replies through `handleApprovalReply()`.
  *
  * A tool is `{ schema, backend }` — identical whether the backend is a
- * direct function call or an MCP client (see
- * `.claude/adrs/0011-extension-mechanism.md` for the indistinguishability
- * requirement and `.claude/adrs/0003-central-brain-interface.md` for how
- * this layer preserves the MCP-primary migration path).
+ * direct function call or an MCP client. ADR 0011 owns the
+ * indistinguishability requirement; ADR 0003 owns the layering that
+ * preserves the MCP-primary migration path.
  *
  * Every `invoke()` passes through the approval gate before the backend
  * runs. Read-tier tools pass through; destructive tools gate on the

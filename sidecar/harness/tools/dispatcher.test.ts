@@ -18,9 +18,10 @@
  * are registered with the dispatcher and asserted to produce identical
  * schemas and identical `ToolResult`s for the same input.
  *
- * Out-of-process MCP (real stdio subprocess) is deferred to Phase 4,
- * where the browser MCP server lands and gives us a non-test reason
- * to exercise the transport under real conditions.
+ * Out-of-process MCP (a real stdio subprocess) is intentionally not
+ * covered here — the in-memory transport exercises the same MCP SDK
+ * request handlers, and the stdio transport picks up integration
+ * coverage alongside the first real out-of-process MCP server.
  */
 
 import { describe, expect, it } from 'vitest';
