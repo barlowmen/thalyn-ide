@@ -16,9 +16,6 @@ import type { ToolCall, ToolResult, ToolSchema } from '../tools/types';
  * observability all live *above* this interface in the harness. The
  * brain's job is: turn a request into a stream of text and tool calls,
  * and surface errors. Everything else is the harness's.
- *
- * The full rationale for what is and is not in this interface — and the
- * narrowness of the contract — is captured in ADR 0003.
  */
 export interface CentralBrain {
 	/**

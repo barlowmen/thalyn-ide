@@ -104,7 +104,7 @@ export interface AgentDeps {
 	 * Harness-owned approval gate. The Claude adapter's SDK-level
 	 * `canUseTool` hook delegates to this; the hook fires under API-key
 	 * auth and is bypassed under OAuth auth by the bundled CLI. The gate
-	 * is the authoritative decision-maker in either case (see ADR 0012).
+	 * is the authoritative decision-maker in either case.
 	 */
 	readonly approvalGate: ApprovalGate;
 	/** Working directory used for the SDK session. */

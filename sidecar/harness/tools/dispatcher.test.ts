@@ -6,11 +6,11 @@
 /**
  * Indistinguishability test for the tool-dispatch boundary.
  *
- * Per ADR 0011's extension mechanism (hybrid built-in + MCP, MCP-primary
- * migration path preserved) and ADR 0003's tool-dispatch contract, a
- * tool's schema, invocation surface, streaming/cancel semantics, and
+ * A tool's schema, invocation surface, streaming/cancel semantics, and
  * error channel must be identical regardless of whether the tool is
- * backed by a direct function call or by an MCP server.
+ * backed by a direct function call or by an MCP server — so the hybrid
+ * built-in + MCP model preserves the option of migrating to MCP-primary
+ * without reshaping adapter code.
  *
  * This suite exercises the invariant with `read_file` implemented two
  * ways: once as a `BuiltinBackend` wrapping `fs.readFile`, once as an

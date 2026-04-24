@@ -19,16 +19,17 @@ import type {
  * approval replies through `handleApprovalReply()`.
  *
  * A tool is `{ schema, backend }` — identical whether the backend is a
- * direct function call or an MCP client. ADR 0011 owns the
- * indistinguishability requirement; ADR 0003 owns the layering that
- * preserves the MCP-primary migration path.
+ * direct function call or an MCP client. The boundary is designed so a
+ * built-in tool and an MCP tool are indistinguishable from the brain's
+ * perspective, preserving the option of migrating to MCP-primary
+ * without reshaping adapter code.
  *
  * Every `invoke()` passes through the approval gate before the backend
  * runs. Read-tier tools pass through; destructive tools gate on the
  * user's reply to a `tool.approval.request` webview notification.
  *
- * The dispatcher does not enforce budget or emit observability — those
- * wrap the dispatcher in later Phase-3 sessions, not inside it.
+ * The dispatcher does not enforce budget or emit observability —
+ * those concerns wrap the dispatcher rather than living inside it.
  */
 export class ToolDispatcher {
 	private readonly tools = new Map<string, RegisteredTool>();

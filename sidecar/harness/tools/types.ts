@@ -7,9 +7,7 @@ import type { ToolTier } from '../../protocol';
 
 /**
  * The tool shape the brain sees. Identical whether the tool is backed
- * by a direct function call or by an MCP server — see ADR 0011's
- * indistinguishability requirement and ADR 0003's "Tool-dispatch
- * boundary" section for the full design.
+ * by a direct function call or by an MCP server.
  *
  * `inputSchema` is a JSON Schema describing the `input` object the
  * brain will emit on a `tool_use` call. It is typed as
