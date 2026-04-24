@@ -42,6 +42,10 @@
     "compile": "gulp compile-extension:agent-panel",
     "watch": "gulp watch-extension:agent-panel"
   },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/microsoft/vscode.git"
