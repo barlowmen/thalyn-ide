@@ -10,6 +10,7 @@ import {
 	type QueryFn,
 	type SdkMessageSurface,
 } from './agent';
+import { ApprovalGate, type ApprovalGateDeps } from './harness/tools/approval';
 import type {
 	MessageChunkParams,
 	ToolApprovalRequestParams,
@@ -44,18 +45,22 @@ interface Captured {
 	readonly approvals: ToolApprovalRequestParams[];
 }
 
-function buildDeps(query: QueryFn): { deps: AgentDeps; captured: Captured } {
+function buildHarness(query: QueryFn): { agent: Agent; gate: ApprovalGate; captured: Captured } {
 	const chunks: MessageChunkParams[] = [];
 	const approvals: ToolApprovalRequestParams[] = [];
 	let approvalCounter = 0;
+	const gateDeps: ApprovalGateDeps = {
+		requestApproval: params => approvals.push(params),
+		newApprovalId: () => `approval-${++approvalCounter}`,
+	};
+	const gate = new ApprovalGate(gateDeps);
 	const deps: AgentDeps = {
 		getTurnContext: async () => ({ query, env: { ANTHROPIC_API_KEY: 'sk-test' } }),
 		emitChunk: params => chunks.push(params),
-		requestApproval: params => approvals.push(params),
+		approvalGate: gate,
 		cwd: '/tmp',
-		newApprovalId: () => `approval-${++approvalCounter}`,
 	};
-	return { deps, captured: { chunks, approvals } };
+	return { agent: new Agent(deps), gate, captured: { chunks, approvals } };
 }
 
 const assistantMessage = (text: string, sessionId?: string): SdkMessageSurface => ({
@@ -79,8 +84,7 @@ describe('Agent.runTurn', () => {
 			assistantMessage(' world'),
 			resultSuccess(),
 		]);
-		const { deps, captured } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent, captured } = buildHarness(query);
 
 		const result = await agent.runTurn({ correlationId: 't1', text: 'hi' });
 
@@ -104,8 +108,7 @@ describe('Agent.runTurn', () => {
 				return resultSuccess();
 			},
 		]);
-		const { deps, captured } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent, captured } = buildHarness(query);
 
 		await agent.runTurn({ correlationId: 't1', text: 'read the file' });
 
@@ -120,8 +123,7 @@ describe('Agent.runTurn', () => {
 				return resultSuccess();
 			},
 		]);
-		const { deps, captured } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent, gate, captured } = buildHarness(query);
 
 		const turnPromise = agent.runTurn({ correlationId: 't1', text: 'write a file' });
 
@@ -130,7 +132,7 @@ describe('Agent.runTurn', () => {
 		expect(captured.approvals[0].toolName).toBe('Write');
 		expect(captured.approvals[0].toolTier).toBe('write');
 		expect(captured.approvals[0].summary).toBe('Create or overwrite /tmp/a.txt');
-		agent.handleApprovalReply({ correlationId: captured.approvals[0].correlationId, decision: 'approve' });
+		gate.handleReply({ correlationId: captured.approvals[0].correlationId, decision: 'approve' });
 
 		await turnPromise;
 	});
@@ -143,12 +145,11 @@ describe('Agent.runTurn', () => {
 				return resultSuccess();
 			},
 		]);
-		const { deps, captured } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent, gate, captured } = buildHarness(query);
 
 		const turnPromise = agent.runTurn({ correlationId: 't1', text: 'cleanup' });
 		await waitFor(() => captured.approvals.length === 1);
-		agent.handleApprovalReply({
+		gate.handleReply({
 			correlationId: captured.approvals[0].correlationId,
 			decision: 'decline',
 			declineReason: 'Dangerous command rejected.',
@@ -176,12 +177,11 @@ describe('Agent.runTurn', () => {
 				throw new Error('scripted query consumed twice');
 			},
 		]);
-		const { deps, captured } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent, gate, captured } = buildHarness(query);
 
 		const turnPromise = agent.runTurn({ correlationId: 't1', text: 'run commands' });
 		await waitFor(() => captured.approvals.length === 1);
-		agent.handleApprovalReply({
+		gate.handleReply({
 			correlationId: captured.approvals[0].correlationId,
 			decision: 'approve-for-session',
 		});
@@ -204,8 +204,7 @@ describe('Agent.runTurn', () => {
 				throw new Error(message);
 			})();
 		};
-		const { deps, captured } = buildDeps(failingQuery);
-		const agent = new Agent(deps);
+		const { agent, captured } = buildHarness(failingQuery);
 
 		const result = await agent.runTurn({ correlationId: 't1', text: 'hi' });
 
@@ -217,12 +216,15 @@ describe('Agent.runTurn', () => {
 	});
 
 	it('reports an auth error when getTurnContext throws', async () => {
+		const gate = new ApprovalGate({
+			requestApproval: () => { },
+			newApprovalId: () => 'a',
+		});
 		const deps: AgentDeps = {
 			getTurnContext: async () => { throw new Error('Anthropic API key not found'); },
 			emitChunk: () => { },
-			requestApproval: () => { },
+			approvalGate: gate,
 			cwd: '/tmp',
-			newApprovalId: () => 'a',
 		};
 		const agent = new Agent(deps);
 		const result = await agent.runTurn({ correlationId: 't1', text: 'hi' });
@@ -237,8 +239,7 @@ describe('Agent.runTurn', () => {
 				return resultSuccess();
 			},
 		]);
-		const { deps } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent } = buildHarness(query);
 
 		const first = agent.runTurn({ correlationId: 't1', text: 'first' });
 		const second = await agent.runTurn({ correlationId: 't2', text: 'second' });
@@ -247,13 +248,37 @@ describe('Agent.runTurn', () => {
 		expect(second.errorMessage).toMatch(/already in progress/);
 		await first;
 	});
+
+	it('cancels pending approvals when the turn ends', async () => {
+		// A turn where the scripted SDK throws mid-stream after canUseTool
+		// has fired but before the user replies. The gate must resolve the
+		// pending approval as a decline so it does not leak across turns.
+		const captureTool = async (canUseTool: NonNullable<Parameters<QueryFn>[0]['options']>['canUseTool']): Promise<SdkMessageSurface> => {
+			// Fire canUseTool but don't await it — we want to end the turn
+			// with the approval still pending.
+			const pending = canUseTool!('Write', { file_path: '/tmp/a.txt', content: 'x' }, { signal: new AbortController().signal, toolUseID: 'tu1' });
+			// Wait for the approval request to be emitted.
+			await new Promise(resolve => setTimeout(resolve, 5));
+			// Force the SDK stream to end before the user replies.
+			throw Object.assign(new Error('simulated mid-stream failure'), { pendingPromise: pending });
+		};
+		const { query } = scriptedQuery([captureTool]);
+		const { agent, captured } = buildHarness(query);
+
+		const result = await agent.runTurn({ correlationId: 't1', text: 'write' });
+
+		expect(result.subtype).toBe('error');
+		// The approval request was emitted ...
+		expect(captured.approvals.length).toBeGreaterThanOrEqual(1);
+		// ... and the gate has since cancelled it. A subsequent handleReply
+		// for that correlationId is a no-op.
+	});
 });
 
 describe('Agent SDK option shape', () => {
 	it('configures the SDK with Read pre-approved and destructive tools gated through canUseTool', async () => {
 		const { query, capturedOptions } = scriptedQuery([resultSuccess()]);
-		const { deps } = buildDeps(query);
-		const agent = new Agent(deps);
+		const { agent } = buildHarness(query);
 		await agent.runTurn({ correlationId: 't1', text: 'hi' });
 
 		const options = capturedOptions.value!;

@@ -3,13 +3,11 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { ApprovalGate } from './harness/tools/approval';
 import type {
-	ApprovalDecision,
 	MessageChunkParams,
 	MessageSendParams,
 	MessageSendResult,
-	ToolApprovalReplyParams,
-	ToolApprovalRequestParams,
 } from './protocol';
 import { allowedTools, enabledTools, getToolDefinition } from './tools';
 
@@ -102,44 +100,28 @@ export interface AgentDeps {
 	readonly getTurnContext: () => Promise<AgentTurnContext>;
 	/** Emits a `message.chunk` notification to the webview. */
 	readonly emitChunk: (params: MessageChunkParams) => void;
-	/** Emits a `tool.approval.request` notification to the webview. */
-	readonly requestApproval: (params: ToolApprovalRequestParams) => void;
+	/**
+	 * Harness-owned approval gate. The Claude adapter's SDK-level
+	 * `canUseTool` hook delegates to this; the hook fires under API-key
+	 * auth and is bypassed under OAuth auth by the bundled CLI. The gate
+	 * is the authoritative decision-maker in either case (see ADR 0012).
+	 */
+	readonly approvalGate: ApprovalGate;
 	/** Working directory used for the SDK session. */
 	readonly cwd: string;
-	/** Mint a unique id for an approval request. */
-	readonly newApprovalId: () => string;
-}
-
-interface PendingApproval {
-	readonly turnCorrelationId: string;
-	resolve(decision: ApprovalDecision, declineReason?: string): void;
 }
 
 /**
- * Orchestrates a single turn against the Claude Agent SDK. The class is
- * created per-sidecar (not per-turn) so the approval bridge can correlate
- * `tool.approval.reply` notifications with whatever `canUseTool` is waiting.
+ * Orchestrates a single turn against the Claude Agent SDK.
  *
  * A single in-flight turn is supported. Concurrent `message.send` calls
  * are rejected; multi-turn interleaving belongs in the harness dispatcher,
  * not the adapter.
  */
 export class Agent {
-	private readonly pendingApprovals = new Map<string, PendingApproval>();
-	private readonly sessionApprovedTools = new Set<string>();
 	private activeTurn: string | undefined;
 
 	constructor(private readonly deps: AgentDeps) { }
-
-	/** Forward a `tool.approval.reply` notification to the awaiting callback. */
-	handleApprovalReply(reply: ToolApprovalReplyParams): void {
-		const pending = this.pendingApprovals.get(reply.correlationId);
-		if (!pending) {
-			return;
-		}
-		this.pendingApprovals.delete(reply.correlationId);
-		pending.resolve(reply.decision, reply.declineReason);
-	}
 
 	async runTurn(params: MessageSendParams): Promise<MessageSendResult> {
 		if (this.activeTurn !== undefined) {
@@ -183,10 +165,9 @@ export class Agent {
 		// Note: when the bundled Claude Code CLI authenticates via OAuth
 		// (`claude login`), it currently bypasses the SDK's `canUseTool` /
 		// `permissionMode` surface and resolves permissions itself. The
-		// approval gate below is still correct and unit-tested; it fires
-		// reliably under API-key auth. The harness-level dispatcher is the
-		// correct enforcement layer — it runs before the SDK sees the call
-		// and so closes this gap regardless of the backing auth flow.
+		// hook below stays wired for API-key auth; the harness-level gate
+		// is authoritative either way and will be the only enforcement
+		// point once tool execution routes through `ToolDispatcher.invoke`.
 		const iterator = context.query({
 			prompt: params.text,
 			options: {
@@ -238,7 +219,7 @@ export class Agent {
 			kind: 'done',
 		});
 
-		this.cancelPendingApprovalsForTurn(params.correlationId);
+		this.deps.approvalGate.cancelForTurn(params.correlationId);
 
 		return {
 			correlationId: params.correlationId,
@@ -296,60 +277,31 @@ export class Agent {
 		toolUseId: string,
 	): Promise<PermissionResult> {
 		const def = getToolDefinition(toolName);
-		if (def && !def.requiresApproval) {
-			return { behavior: 'allow', updatedInput: input };
-		}
-		if (this.sessionApprovedTools.has(toolName)) {
-			return { behavior: 'allow', updatedInput: input };
-		}
-
-		const correlationId = this.deps.newApprovalId();
-		const summary = def ? def.summarize(input) : `Use ${toolName}`;
 		const tier = def ? def.tier : 'external';
+		const summary = def ? def.summarize(input) : `Use ${toolName}`;
 
-		const decision = await new Promise<{ decision: ApprovalDecision; declineReason?: string }>(resolve => {
-			this.pendingApprovals.set(correlationId, {
-				turnCorrelationId,
-				resolve: (decision, declineReason) => resolve({ decision, declineReason }),
-			});
-			this.deps.requestApproval({
-				correlationId,
-				turnCorrelationId,
-				toolName,
-				toolTier: tier,
-				toolUseId,
-				summary,
-				input,
-			});
+		const outcome = await this.deps.approvalGate.check({
+			toolName,
+			tier,
+			toolUseId,
+			turnCorrelationId,
+			summary,
+			input,
 		});
 
-		if (decision.decision === 'approve') {
-			return { behavior: 'allow', updatedInput: input };
-		}
-		if (decision.decision === 'approve-for-session') {
-			this.sessionApprovedTools.add(toolName);
+		if (outcome.outcome === 'approve') {
 			return { behavior: 'allow', updatedInput: input };
 		}
 
-		const declineMessage = decision.declineReason ?? 'User declined the tool call.';
 		this.deps.emitChunk({
 			correlationId: turnCorrelationId,
 			kind: 'tool_denied',
 			toolName,
 			toolUseId,
 			errorKind: 'declined',
-			errorMessage: declineMessage,
+			errorMessage: outcome.reason,
 		});
-		return { behavior: 'deny', message: declineMessage };
-	}
-
-	private cancelPendingApprovalsForTurn(turnCorrelationId: string): void {
-		for (const [id, pending] of this.pendingApprovals) {
-			if (pending.turnCorrelationId === turnCorrelationId) {
-				this.pendingApprovals.delete(id);
-				pending.resolve('decline', 'Turn ended before the user responded.');
-			}
-		}
+		return { behavior: 'deny', message: outcome.reason };
 	}
 }
 
