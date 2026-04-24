@@ -1,0 +1,54 @@
+{
+  "name": "agent-panel",
+  "displayName": "Thalyn",
+  "description": "Thalyn agent chat panel.",
+  "version": "0.0.1",
+  "publisher": "vscode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.5.0"
+  },
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onView:agentPanel.chat"
+  ],
+  "main": "./out/extension",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-panel",
+          "title": "Thalyn",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "agent-panel": [
+        {
+          "type": "webview",
+          "id": "agentPanel.chat",
+          "name": "Thalyn"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "gulp compile-extension:agent-panel",
+    "watch": "gulp watch-extension:agent-panel",
+    "test": "mocha out/**/*.test.js --ui tdd --reporter spec"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
+  }
+}
