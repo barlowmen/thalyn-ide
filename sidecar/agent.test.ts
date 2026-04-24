@@ -191,10 +191,17 @@ describe('Agent.runTurn', () => {
 		expect(captured.approvals).toHaveLength(1);
 	});
 
-	it('surfaces SDK iterator errors as an auth/network/rate-limit classified error', async () => {
+	it.each([
+		{ name: 'network (ECONNREFUSED)', message: 'fetch failed: ECONNREFUSED localhost:443', kind: 'network' },
+		{ name: 'auth (401)', message: 'Request failed with status 401: Unauthorized', kind: 'auth' },
+		{ name: 'auth (invalid api key)', message: 'Invalid API key provided', kind: 'auth' },
+		{ name: 'rate limit (429)', message: 'Request failed with status 429: Too Many Requests', kind: 'rate_limit' },
+		{ name: 'rate limit (phrase)', message: 'You have hit the rate limit for this model', kind: 'rate_limit' },
+		{ name: 'unknown (500)', message: 'Internal server error', kind: 'unknown' },
+	])('classifies SDK iterator error: $name', async ({ message, kind }) => {
 		const failingQuery: QueryFn = () => {
 			return (async function* (): AsyncGenerator<SdkMessageSurface, void, unknown> {
-				throw new Error('fetch failed: ECONNREFUSED localhost:443');
+				throw new Error(message);
 			})();
 		};
 		const { deps, captured } = buildDeps(failingQuery);
@@ -203,10 +210,10 @@ describe('Agent.runTurn', () => {
 		const result = await agent.runTurn({ correlationId: 't1', text: 'hi' });
 
 		expect(result.subtype).toBe('error');
-		expect(result.errorKind).toBe('network');
+		expect(result.errorKind).toBe(kind);
 		const errorChunk = captured.chunks.find(c => c.kind === 'error');
 		expect(errorChunk).toBeDefined();
-		expect(errorChunk!.errorKind).toBe('network');
+		expect(errorChunk!.errorKind).toBe(kind);
 	});
 
 	it('reports an auth error when getTurnContext throws', async () => {

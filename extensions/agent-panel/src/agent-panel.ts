@@ -180,7 +180,7 @@ export class AgentPanelProvider implements WebviewViewProvider {
 			<textarea
 				id="input"
 				class="input"
-				rows="2"
+				rows="3"
 				placeholder="Message the agent&#8230;"
 				aria-label="Message the agent"></textarea>
 			<button type="submit" id="submit" class="submit">Send</button>

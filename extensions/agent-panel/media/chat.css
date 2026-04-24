@@ -38,8 +38,10 @@ html, body {
 }
 
 .message.user {
-	background: var(--vscode-input-background);
-	color: var(--vscode-input-foreground);
+	background: transparent;
+	color: var(--vscode-foreground);
+	border-left: 2px solid var(--vscode-focusBorder, var(--vscode-button-background));
+	padding-left: 10px;
 }
 
 .message.agent {
@@ -92,9 +94,52 @@ html, body {
 }
 
 .tool-line.tool-result-error,
-.tool-line.tool-denied,
-.tool-line.tool-error {
+.tool-line.tool-denied {
 	color: var(--vscode-errorForeground);
+}
+
+.message-error {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.message-error:empty {
+	display: none;
+}
+
+.error-block {
+	padding: 6px 8px;
+	border-radius: 3px;
+	border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+	background: var(--vscode-inputValidation-errorBackground, rgba(229, 72, 77, 0.08));
+	color: var(--vscode-foreground);
+	font-size: 0.9em;
+}
+
+.error-block.error-network,
+.error-block.error-rate_limit {
+	border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
+	background: var(--vscode-inputValidation-warningBackground, rgba(209, 154, 102, 0.08));
+}
+
+.error-label {
+	font-weight: 600;
+	margin-bottom: 2px;
+	color: var(--vscode-errorForeground);
+}
+
+.error-block.error-network .error-label,
+.error-block.error-rate_limit .error-label {
+	color: var(--vscode-editorWarning-foreground, var(--vscode-errorForeground));
+}
+
+.error-text {
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	font-family: var(--vscode-editor-font-family, var(--vscode-font-family));
+	font-size: 0.9em;
 }
 
 .approval-card {
@@ -122,12 +167,27 @@ html, body {
 
 .approval-details {
 	margin: 0 0 8px 0;
+	font-size: 0.85em;
+}
+
+.approval-details > summary {
+	cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+	user-select: none;
+	padding: 2px 0;
+}
+
+.approval-details > summary:hover {
+	color: var(--vscode-foreground);
+}
+
+.approval-details-body {
+	margin: 4px 0 0 0;
 	padding: 6px 8px;
 	max-height: 160px;
 	overflow: auto;
 	background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.08));
 	border-radius: 3px;
-	font-size: 0.85em;
 	white-space: pre-wrap;
 }
 
@@ -184,10 +244,13 @@ html, body {
 
 .input {
 	flex: 1 1 auto;
-	resize: none;
+	resize: vertical;
+	min-height: 56px;
+	max-height: 40vh;
 	padding: 6px 8px;
 	font-family: inherit;
 	font-size: inherit;
+	line-height: 1.4;
 	color: var(--vscode-input-foreground);
 	background: var(--vscode-input-background);
 	border: 1px solid var(--vscode-input-border, transparent);
