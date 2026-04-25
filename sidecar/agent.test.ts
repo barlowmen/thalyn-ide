@@ -121,6 +121,23 @@ describe('Agent.runTurn', () => {
 		expect(captured.request!.tools).toEqual([]);
 	});
 
+	it('threads systemPrompt from AgentDeps into BrainRequest.system', async () => {
+		const { brain, captured } = scriptedBrain([
+			{ kind: 'done', sessionId: 's' },
+		]);
+		const gate = new ApprovalGate({ requestApproval: () => { }, newApprovalId: () => 'a' });
+		const agent = new Agent({
+			getBrain: async () => brain,
+			emitChunk: () => { },
+			approvalGate: gate,
+			systemPrompt: '# Identity\n\nname: John',
+		});
+
+		await agent.runTurn({ correlationId: 't1', text: 'hi' });
+
+		expect(captured.request?.system).toBe('# Identity\n\nname: John');
+	});
+
 	it.each([
 		{ name: 'auth', errorKind: 'auth' as const, expected: 'auth' as const },
 		{ name: 'rate_limit', errorKind: 'rate_limit' as const, expected: 'rate_limit' as const },

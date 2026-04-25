@@ -20,6 +20,8 @@ import { loadBudgetConfigWithOverride } from './harness/budget/config';
 import { DefaultEstimator } from './harness/budget/estimator';
 import { BudgetMeter } from './harness/budget/meter';
 import type { BudgetConfig, CallDescriptor } from './harness/budget/types';
+import { RulesLoader } from './harness/memory/rules-loader';
+import { SdkMemory } from './harness/memory/sdk-memory';
 import { Persistence } from './harness/persistence';
 import { ApprovalGate } from './harness/tools/approval';
 import { loadAnthropicApiKey } from './keychain';
@@ -63,7 +65,11 @@ export async function main(): Promise<void> {
 	const gate = buildApprovalGate(server);
 	const budget = await buildBudgetSubsystem(server, paths);
 	const tracer = otelTrace.getTracer('thalyn-sidecar');
-	const agent = buildAgent(server, gate, budget, tracer, defaultSdkLoader);
+	const memory = await buildMemoryWiring(process.cwd());
+	const agent = buildAgent(server, gate, budget, tracer, defaultSdkLoader, {
+		systemPrompt: memory.systemPrompt,
+		memoryDirectory: memory.memoryDirectory,
+	});
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
 		params => agent.runTurn(params),
@@ -107,6 +113,20 @@ export function buildApprovalGate(server: RpcServer): ApprovalGate {
 }
 
 /**
+ * Wiring resolved at session start that the Agent and adapter both
+ * consume. Loaded once because per-session semantics: rule files and
+ * the memory directory don't change mid-session.
+ */
+export interface AgentWiring {
+	/** Three-layer rules concatenated into a system-prompt prefix. */
+	readonly systemPrompt: string;
+	/** Absolute path the SDK Memory Tool should write to. */
+	readonly memoryDirectory: string;
+	/** Defaults to {@link DEFAULT_BRAIN_MODEL} when omitted. */
+	readonly model?: string;
+}
+
+/**
  * Constructs an Agent driving a {@link ClaudeAdapter}-backed brain. The
  * SDK loader is injected so tests can substitute a fake; production
  * supplies `defaultSdkLoader`, which dynamically imports
@@ -125,15 +145,42 @@ export function buildAgent(
 	budget: BudgetSubsystem,
 	tracer: Tracer,
 	sdkLoader: () => Promise<ClaudeQueryFn>,
-	model: string = DEFAULT_BRAIN_MODEL,
+	wiring: AgentWiring,
 ): Agent {
 	const canUseTool = buildCanUseTool(server, gate);
+	const model = wiring.model ?? DEFAULT_BRAIN_MODEL;
 
 	return new Agent({
-		getBrain: buildBrainLoader({ server, gate, budget, tracer, sdkLoader, model, canUseTool }),
+		getBrain: buildBrainLoader({
+			server, gate, budget, tracer, sdkLoader, model, canUseTool,
+			memoryDirectory: wiring.memoryDirectory,
+		}),
 		emitChunk: params => server.notify('message.chunk', params),
 		approvalGate: gate,
+		systemPrompt: wiring.systemPrompt,
 	});
+}
+
+/**
+ * Resolve the rules + SDK memory state used by every turn in this session.
+ * Identity, agent preferences, and per-project rules are loaded from their
+ * standard locations and concatenated into a system-prompt prefix. The
+ * SDK memory directory under `~/.config/thalyn/memories/claude/` is
+ * created if missing — the Memory Tool then uses it via the adapter's
+ * inline `settings.autoMemoryDirectory`.
+ */
+export async function buildMemoryWiring(workspaceDir: string): Promise<{
+	systemPrompt: string;
+	memoryDirectory: string;
+}> {
+	const rules = new RulesLoader(RulesLoader.defaultPaths(workspaceDir));
+	const ruleFiles = await rules.load();
+	const systemPrompt = RulesLoader.assemble(ruleFiles);
+
+	const memory = new SdkMemory({ dir: SdkMemory.defaultDir('claude') });
+	await memory.ensure();
+
+	return { systemPrompt, memoryDirectory: memory.path };
 }
 
 /** Default Claude model used by the primary-brain adapter. */
@@ -147,6 +194,7 @@ interface BrainLoaderDeps {
 	readonly sdkLoader: () => Promise<ClaudeQueryFn>;
 	readonly model: string;
 	readonly canUseTool: ClaudeCanUseTool;
+	readonly memoryDirectory: string;
 }
 
 /**
@@ -177,6 +225,14 @@ function buildBrainLoader(deps: BrainLoaderDeps): () => Promise<ClaudeAdapter> {
 			allowedTools: harnessAllowedTools(),
 			permissionMode: 'default',
 			canUseTool: deps.canUseTool,
+			// Inline `settings` redirects the SDK Memory Tool to our
+			// harness-managed directory. This is the only place the SDK
+			// reads `autoMemoryDirectory` from when `settingSources` is
+			// `[]` — and we keep `settingSources: []` so a stray
+			// ~/.claude/settings.json cannot widen tool permissions.
+			settings: {
+				autoMemoryDirectory: deps.memoryDirectory,
+			},
 			budget: {
 				meter: deps.budget.meter,
 				tracer: deps.tracer,

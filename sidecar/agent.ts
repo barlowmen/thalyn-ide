@@ -48,6 +48,14 @@ export interface AgentDeps {
 	 * regardless of which adapter is active.
 	 */
 	readonly approvalGate: ApprovalGate;
+	/**
+	 * System prompt prepended to every {@link BrainRequest}. Built once at
+	 * session start by the rules loader (identity → preferences → project
+	 * rules; later sections take precedence on conflict per ADR memory
+	 * design). Empty string means no rules were found, which is normal on
+	 * a fresh install.
+	 */
+	readonly systemPrompt?: string;
 }
 
 /**
@@ -110,7 +118,7 @@ export class Agent {
 		}
 
 		const request: BrainRequest = {
-			system: '',
+			system: this.deps.systemPrompt ?? '',
 			messages: [userMessage(params.text)],
 			tools: [],
 		};
