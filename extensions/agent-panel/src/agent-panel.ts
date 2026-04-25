@@ -5,6 +5,9 @@
 
 import { CancellationToken, Disposable, Uri, Webview, WebviewView, WebviewViewProvider, WebviewViewResolveContext } from 'vscode';
 import type {
+	BudgetApprovalReplyParams,
+	BudgetApprovalRequestParams,
+	BudgetSnapshotResult,
 	MessageChunkParams,
 	MessageSendParams,
 	MessageSendResult,
@@ -58,6 +61,15 @@ export class AgentPanelProvider implements WebviewViewProvider {
 				'tool.approval.request',
 				params => this.onApprovalRequest(webviewView.webview, params),
 			)));
+			subscriptions.push(disposableFor(sidecar.onNotification<BudgetApprovalRequestParams>(
+				'budget.approval.request',
+				params => this.onBudgetApprovalRequest(webviewView.webview, params),
+			)));
+			subscriptions.push(disposableFor(sidecar.onNotification<undefined>(
+				'budget.changed',
+				() => { void this.pushSnapshot(webviewView.webview); },
+			)));
+			void this.pushSnapshot(webviewView.webview);
 		}
 
 		webviewView.onDidDispose(() => {
@@ -124,6 +136,21 @@ export class AgentPanelProvider implements WebviewViewProvider {
 				sidecar.notify('tool.approval.reply', reply);
 				return;
 			}
+			case 'budget.approval.reply': {
+				if (!sidecar) {
+					return;
+				}
+				const reply: BudgetApprovalReplyParams = {
+					correlationId: message.correlationId,
+					decision: message.decision,
+				};
+				sidecar.notify('budget.approval.reply', reply);
+				return;
+			}
+			case 'budget.refresh': {
+				void this.pushSnapshot(webview);
+				return;
+			}
 		}
 	}
 
@@ -159,6 +186,38 @@ export class AgentPanelProvider implements WebviewViewProvider {
 		void webview.postMessage(host);
 	}
 
+	private onBudgetApprovalRequest(webview: Webview, params: BudgetApprovalRequestParams): void {
+		const host: HostToWebviewMessage = {
+			type: 'budget.approval.request',
+			correlationId: params.correlationId,
+			category: params.category,
+			reason: params.reason,
+			unit: params.unit,
+			estimate: params.estimate,
+			currentSpend: params.currentSpend,
+			window: params.window,
+			softCap: params.softCap,
+			hardCap: params.hardCap,
+			preflightCap: params.preflightCap,
+		};
+		void webview.postMessage(host);
+	}
+
+	private async pushSnapshot(webview: Webview): Promise<void> {
+		const sidecar = this.sidecarProvider();
+		if (!sidecar) {
+			return;
+		}
+		try {
+			const snapshot = await sidecar.call<BudgetSnapshotResult>('budget.snapshot');
+			const host: HostToWebviewMessage = { type: 'budget.snapshot', snapshot };
+			void webview.postMessage(host);
+		} catch {
+			// The sidecar may have crashed or be restarting. Swallow — the
+			// next `budget.changed` (or a manual refresh) will retry.
+		}
+	}
+
 	private renderHtml(webview: Webview, mediaRoot: Uri): string {
 		const styleUri = webview.asWebviewUri(Uri.joinPath(mediaRoot, 'chat.css'));
 		const scriptUri = webview.asWebviewUri(Uri.joinPath(mediaRoot, 'chat.js'));
@@ -175,6 +234,14 @@ export class AgentPanelProvider implements WebviewViewProvider {
 </head>
 <body>
 	<div class="chat">
+		<div id="budget-strip" class="budget-strip" role="status" aria-live="polite" aria-label="Budget summary" hidden>
+			<button type="button" id="budget-strip-toggle" class="budget-strip-toggle"
+				aria-expanded="false" aria-controls="budget-strip-detail">
+				<span id="budget-strip-summary" class="budget-strip-summary"></span>
+				<span class="budget-strip-chevron" aria-hidden="true">&#9660;</span>
+			</button>
+			<div id="budget-strip-detail" class="budget-strip-detail" hidden></div>
+		</div>
 		<ul id="messages" class="messages" aria-live="polite" aria-label="Chat messages"></ul>
 		<form id="composer" class="composer">
 			<textarea

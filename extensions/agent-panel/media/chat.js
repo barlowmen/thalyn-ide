@@ -16,11 +16,20 @@
 	const composerEl = /** @type {HTMLFormElement} */ (document.getElementById('composer'));
 	const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
 	const submitEl = /** @type {HTMLButtonElement} */ (document.getElementById('submit'));
+	const budgetStripEl = /** @type {HTMLDivElement} */ (document.getElementById('budget-strip'));
+	const budgetStripToggleEl = /** @type {HTMLButtonElement} */ (document.getElementById('budget-strip-toggle'));
+	const budgetStripSummaryEl = /** @type {HTMLSpanElement} */ (document.getElementById('budget-strip-summary'));
+	const budgetStripDetailEl = /** @type {HTMLDivElement} */ (document.getElementById('budget-strip-detail'));
 
 	/** @type {Map<string, { textEl: HTMLElement, toolsEl: HTMLElement, statusEl: HTMLElement, errorEl: HTMLElement, errorShown: boolean }>} */
 	const turns = new Map();
 	/** @type {Map<string, HTMLElement>} */
 	const approvalCards = new Map();
+	/** @type {Map<string, HTMLElement>} */
+	const budgetApprovalCards = new Map();
+	/** @type {{ asOf: number, categories: Array<any> } | null} */
+	let lastSnapshot = null;
+	let budgetStripExpanded = false;
 
 	/** @type {Record<string, string>} */
 	const errorKindLabels = {
@@ -310,8 +319,249 @@
 			case 'tool.approval.request':
 				handleApprovalRequest(message);
 				return;
+			case 'budget.snapshot':
+				handleBudgetSnapshot(message.snapshot);
+				return;
+			case 'budget.approval.request':
+				handleBudgetApprovalRequest(message);
+				return;
 		}
 	});
 
+	budgetStripToggleEl.addEventListener('click', () => {
+		budgetStripExpanded = !budgetStripExpanded;
+		budgetStripDetailEl.hidden = !budgetStripExpanded;
+		budgetStripEl.classList.toggle('expanded', budgetStripExpanded);
+		budgetStripToggleEl.setAttribute('aria-expanded', budgetStripExpanded ? 'true' : 'false');
+	});
+
+	/** @param {{ asOf: number, categories: Array<any> }} snapshot */
+	function handleBudgetSnapshot(snapshot) {
+		lastSnapshot = snapshot;
+		renderBudgetStrip();
+	}
+
+	function renderBudgetStrip() {
+		if (!lastSnapshot) {
+			budgetStripEl.hidden = true;
+			return;
+		}
+		budgetStripEl.hidden = false;
+		const categories = lastSnapshot.categories || [];
+		const todaySpend = sumDaily(categories);
+		const sessionSpend = todaySpend; // session-scoped persistence not yet wired; today's spend is the live floor.
+		const nearCap = categories
+			.map(decorateWithSeverity)
+			.filter(c => c.severity !== 'ok')
+			.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+
+		while (budgetStripSummaryEl.firstChild) {
+			budgetStripSummaryEl.removeChild(budgetStripSummaryEl.firstChild);
+		}
+		appendPill(budgetStripSummaryEl, 'today: ' + formatUsd(todaySpend), 'ok');
+		appendPill(budgetStripSummaryEl, 'session: ' + formatUsd(sessionSpend), 'ok');
+		if (nearCap.length === 0) {
+			const ok = document.createElement('span');
+			ok.textContent = 'all caps comfortable';
+			ok.className = 'budget-strip-pill';
+			budgetStripSummaryEl.appendChild(ok);
+		} else {
+			for (const cat of nearCap.slice(0, 2)) {
+				appendPill(
+					budgetStripSummaryEl,
+					cat.category + ' ' + Math.round((cat.dailySpend / Math.max(cat.dailySoftCap, 0.0001)) * 100) + '%',
+					cat.severity,
+				);
+			}
+			if (nearCap.length > 2) {
+				const more = document.createElement('span');
+				more.textContent = '+' + (nearCap.length - 2) + ' more';
+				more.className = 'budget-strip-pill';
+				budgetStripSummaryEl.appendChild(more);
+			}
+		}
+		renderBudgetDetail(categories);
+	}
+
+	/** @param {Array<any>} categories */
+	function renderBudgetDetail(categories) {
+		while (budgetStripDetailEl.firstChild) {
+			budgetStripDetailEl.removeChild(budgetStripDetailEl.firstChild);
+		}
+		const decorated = categories.map(decorateWithSeverity);
+		const sorted = decorated.slice().sort((a, b) => {
+			if (a.severity !== b.severity) {
+				return severityRank(b.severity) - severityRank(a.severity);
+			}
+			return a.category.localeCompare(b.category);
+		});
+		const visible = sorted.filter(c => c.dailySpend > 0 || c.weeklySpend > 0 || c.severity !== 'ok');
+		if (visible.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'budget-strip-empty';
+			empty.textContent = 'No spend yet today.';
+			budgetStripDetailEl.appendChild(empty);
+			return;
+		}
+		for (const cat of visible) {
+			const row = document.createElement('div');
+			row.className = 'budget-detail-row';
+			const name = document.createElement('div');
+			name.className = 'budget-detail-name';
+			name.textContent = cat.category;
+			row.appendChild(name);
+			const daily = document.createElement('div');
+			daily.className = 'budget-detail-meter ' + (cat.severity === 'ok' ? '' : cat.severity);
+			daily.textContent = 'daily ' + formatAmount(cat.dailySpend, cat.unit) + ' / ' + formatAmount(cat.dailySoftCap, cat.unit);
+			row.appendChild(daily);
+			const weeklyName = document.createElement('div');
+			weeklyName.className = 'budget-detail-name';
+			weeklyName.textContent = '';
+			row.appendChild(weeklyName);
+			const weekly = document.createElement('div');
+			weekly.className = 'budget-detail-meter';
+			weekly.textContent = 'weekly ' + formatAmount(cat.weeklySpend, cat.unit) + ' / ' + formatAmount(cat.weeklySoftCap, cat.unit);
+			row.appendChild(weekly);
+			budgetStripDetailEl.appendChild(row);
+		}
+	}
+
+	/** @param {HTMLElement} container @param {string} text @param {string} severity */
+	function appendPill(container, text, severity) {
+		const pill = document.createElement('span');
+		pill.className = 'budget-strip-pill' + (severity && severity !== 'ok' ? ' ' + severity : '');
+		pill.textContent = text;
+		container.appendChild(pill);
+	}
+
+	/** @param {Array<any>} categories */
+	function sumDaily(categories) {
+		let total = 0;
+		for (const c of categories) {
+			if (c.unit === 'usd') {
+				total += c.dailySpend;
+			}
+		}
+		return total;
+	}
+
+	/** @param {any} cat */
+	function decorateWithSeverity(cat) {
+		const dailyFraction = cat.dailySoftCap > 0 ? cat.dailySpend / cat.dailySoftCap : 0;
+		const weeklyFraction = cat.weeklySoftCap > 0 ? cat.weeklySpend / cat.weeklySoftCap : 0;
+		const fraction = Math.max(dailyFraction, weeklyFraction);
+		let severity = 'ok';
+		if (fraction >= 1.0) {
+			severity = 'crit';
+		} else if (fraction >= 0.75) {
+			severity = 'warn';
+		}
+		return Object.assign({}, cat, { severity });
+	}
+
+	function severityRank(s) {
+		return s === 'crit' ? 2 : s === 'warn' ? 1 : 0;
+	}
+
+	/** @param {number} value */
+	function formatUsd(value) {
+		return '$' + value.toFixed(2);
+	}
+
+	/** @param {number} value @param {string} unit */
+	function formatAmount(value, unit) {
+		if (unit === 'usd') {
+			return formatUsd(value);
+		}
+		if (unit === 'gpu_seconds') {
+			return value.toFixed(0) + 's';
+		}
+		return String(value);
+	}
+
+	/** @param {any} request */
+	function handleBudgetApprovalRequest(request) {
+		const card = document.createElement('div');
+		card.className = 'approval-card budget-approval reason-' + request.reason;
+
+		const title = document.createElement('div');
+		title.className = 'approval-title';
+		title.textContent = request.reason === 'preflight'
+			? 'Approve expensive ' + request.category + ' call?'
+			: 'Approve ' + (request.window || '') + ' soft cap for ' + request.category + '?';
+		card.appendChild(title);
+
+		const meta = document.createElement('div');
+		meta.className = 'approval-meta';
+		const lines = [];
+		lines.push('estimate ' + formatAmount(request.estimate, request.unit));
+		if (request.reason === 'preflight' && typeof request.preflightCap === 'number') {
+			lines.push('preflight cap ' + formatAmount(request.preflightCap, request.unit));
+		}
+		if (request.reason === 'soft-cap') {
+			if (typeof request.currentSpend === 'number') {
+				lines.push((request.window || 'window') + ' so far ' + formatAmount(request.currentSpend, request.unit));
+			}
+			if (typeof request.softCap === 'number') {
+				lines.push('soft cap ' + formatAmount(request.softCap, request.unit));
+			}
+			if (typeof request.hardCap === 'number') {
+				lines.push('hard cap ' + formatAmount(request.hardCap, request.unit));
+			}
+		}
+		meta.textContent = lines.join(' · ');
+		card.appendChild(meta);
+
+		const actions = document.createElement('div');
+		actions.className = 'approval-actions';
+		const approveBtn = document.createElement('button');
+		approveBtn.type = 'button';
+		approveBtn.className = 'approval-btn approve';
+		approveBtn.textContent = 'Approve';
+		approveBtn.addEventListener('click', () => respondToBudgetApproval(request.correlationId, 'approve'));
+		const sessionBtn = document.createElement('button');
+		sessionBtn.type = 'button';
+		sessionBtn.className = 'approval-btn approve-session';
+		sessionBtn.textContent = 'Approve for session';
+		sessionBtn.addEventListener('click', () => respondToBudgetApproval(request.correlationId, 'approve-for-session'));
+		const declineBtn = document.createElement('button');
+		declineBtn.type = 'button';
+		declineBtn.className = 'approval-btn decline';
+		declineBtn.textContent = 'Decline';
+		declineBtn.addEventListener('click', () => respondToBudgetApproval(request.correlationId, 'decline'));
+		actions.appendChild(approveBtn);
+		actions.appendChild(sessionBtn);
+		actions.appendChild(declineBtn);
+		card.appendChild(actions);
+
+		messagesEl.appendChild(card);
+		budgetApprovalCards.set(request.correlationId, card);
+		scrollToBottom();
+	}
+
+	/**
+	 * @param {string} correlationId
+	 * @param {'approve' | 'decline' | 'approve-for-session'} decision
+	 */
+	function respondToBudgetApproval(correlationId, decision) {
+		const card = budgetApprovalCards.get(correlationId);
+		if (card) {
+			card.classList.add('decided', 'decision-' + decision);
+			const buttons = card.querySelectorAll('button');
+			buttons.forEach(btn => { btn.disabled = true; });
+			const tag = document.createElement('div');
+			tag.className = 'approval-decision';
+			tag.textContent = decision === 'approve'
+				? 'Approved'
+				: decision === 'approve-for-session'
+					? 'Approved for session'
+					: 'Declined';
+			card.appendChild(tag);
+			budgetApprovalCards.delete(correlationId);
+		}
+		vscode.postMessage({ type: 'budget.approval.reply', correlationId, decision });
+	}
+
 	inputEl.focus();
+	vscode.postMessage({ type: 'budget.refresh' });
 }());
