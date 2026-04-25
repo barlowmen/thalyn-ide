@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { CentralBrain, BrainError, BrainMessage, BrainRequest } from './harness/brain/types';
+import type { Persistence } from './harness/persistence';
 import type { ApprovalGate } from './harness/tools/approval';
 import type {
 	MessageChunkParams,
@@ -56,6 +57,18 @@ export interface AgentDeps {
 	 * a fresh install.
 	 */
 	readonly systemPrompt?: string;
+	/**
+	 * Conversation history sink. Each turn writes the user prompt, the
+	 * assistant response (concatenated text), and any tool calls + results
+	 * the brain emitted. Optional so tests don't have to wire it; in
+	 * production the sidecar passes the on-disk {@link Persistence}.
+	 */
+	readonly persistence?: Persistence;
+	/**
+	 * Session id passed to {@link Persistence.appendMessage}. Required when
+	 * `persistence` is set; ignored otherwise.
+	 */
+	readonly sessionId?: string;
 }
 
 /**
@@ -123,15 +136,26 @@ export class Agent {
 			tools: [],
 		};
 
+		// Persist the user prompt at turn start so a mid-turn crash still
+		// preserves it for resume. The assistant message is written at
+		// turn end with the accumulated text + stop reason.
+		const persistTurnStart = Date.now();
+		this.appendUserMessage(params.text, persistTurnStart);
+
 		let sessionId: string | undefined;
+		let stopReason: string | undefined;
 		let terminalSubtype: 'success' | 'error' = 'success';
 		let errorKind: MessageSendResult['errorKind'];
 		let errorMessage: string | undefined;
+		const assistantTextChunks: string[] = [];
+		const pendingToolCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
+		const pendingToolResults = new Map<string, { content: string; isError: boolean }>();
 
 		try {
 			for await (const event of brain.send(request)) {
 				switch (event.kind) {
 					case 'text':
+						assistantTextChunks.push(event.text);
 						this.deps.emitChunk({
 							correlationId: params.correlationId,
 							kind: 'text',
@@ -139,6 +163,10 @@ export class Agent {
 						});
 						break;
 					case 'tool_use': {
+						pendingToolCalls.set(event.call.id, {
+							name: event.call.name,
+							input: event.call.input,
+						});
 						const def = getToolDefinition(event.call.name);
 						this.deps.emitChunk({
 							correlationId: params.correlationId,
@@ -151,6 +179,10 @@ export class Agent {
 						break;
 					}
 					case 'tool_result':
+						pendingToolResults.set(event.result.id, {
+							content: event.result.content,
+							isError: event.result.isError,
+						});
 						this.deps.emitChunk({
 							correlationId: params.correlationId,
 							kind: 'tool_result',
@@ -161,6 +193,7 @@ export class Agent {
 						break;
 					case 'done':
 						sessionId = event.sessionId;
+						stopReason = event.stopReason;
 						break;
 					case 'error':
 						terminalSubtype = 'error';
@@ -188,6 +221,13 @@ export class Agent {
 			});
 		}
 
+		this.appendAssistantMessage(
+			assistantTextChunks.join(''),
+			stopReason,
+			pendingToolCalls,
+			pendingToolResults,
+		);
+
 		this.deps.emitChunk({
 			correlationId: params.correlationId,
 			kind: 'done',
@@ -202,6 +242,59 @@ export class Agent {
 			errorKind,
 			errorMessage,
 		};
+	}
+
+	private appendUserMessage(text: string, ts: number): void {
+		const { persistence, sessionId } = this.deps;
+		if (!persistence || !sessionId) {
+			return;
+		}
+		try {
+			persistence.appendMessage({ sessionId, role: 'user', text, ts });
+		} catch {
+			// Persistence failures must not fail the turn — the brain still
+			// returned a valid stream and the user got a response. Log and
+			// continue. (Hook into observability when the harness adds a
+			// structured logger; today the sidecar's stderr is the floor.)
+		}
+	}
+
+	private appendAssistantMessage(
+		text: string,
+		stopReason: string | undefined,
+		toolCalls: ReadonlyMap<string, { name: string; input: Record<string, unknown> }>,
+		toolResults: ReadonlyMap<string, { content: string; isError: boolean }>,
+	): void {
+		const { persistence, sessionId } = this.deps;
+		if (!persistence || !sessionId) {
+			return;
+		}
+		try {
+			const ts = Date.now();
+			const messageId = persistence.appendMessage({
+				sessionId,
+				role: 'assistant',
+				text,
+				ts,
+				stopReason,
+			});
+			for (const [toolUseId, call] of toolCalls) {
+				const callId = persistence.appendToolCall({
+					messageId,
+					sessionId,
+					toolUseId,
+					toolName: call.name,
+					input: call.input,
+					ts,
+				});
+				const result = toolResults.get(toolUseId);
+				if (result) {
+					persistence.recordToolResult(callId, result.content, result.isError, ts);
+				}
+			}
+		} catch {
+			// See appendUserMessage: never fail a turn over a write error.
+		}
 	}
 
 	private async brain(): Promise<CentralBrain> {

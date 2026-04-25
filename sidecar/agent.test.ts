@@ -10,6 +10,7 @@ import type {
 	BrainStreamEvent,
 	CentralBrain,
 } from './harness/brain/types';
+import { Persistence } from './harness/persistence';
 import { ApprovalGate, type ApprovalGateDeps } from './harness/tools/approval';
 import type { MessageChunkParams, ToolApprovalRequestParams } from './protocol';
 
@@ -228,6 +229,60 @@ describe('Agent.runTurn', () => {
 		// A subsequent reply for the cancelled approval is a no-op — the
 		// gate logs and discards it. ApprovalGate.handleReply has its own
 		// tests; here we only assert the agent-side cancel ran.
+	});
+
+	it('persists user prompt, assistant response, tool calls, and tool results when persistence is wired', async () => {
+		const persistence = new Persistence(':memory:');
+		persistence.upsertSession('s_test', Date.now());
+		const brain: CentralBrain = {
+			async *send() {
+				yield { kind: 'text', text: 'Hello ' };
+				yield { kind: 'text', text: 'world.' };
+				yield { kind: 'tool_use', call: { id: 'tu1', name: 'Read', input: { file_path: '/a.txt' } } };
+				yield {
+					kind: 'tool_result',
+					result: { id: 'tu1', content: 'file bytes', isError: false },
+				};
+				yield { kind: 'done', sessionId: 'sdk-1', stopReason: 'end_turn' };
+			},
+		};
+		const gate = new ApprovalGate({ requestApproval: () => { }, newApprovalId: () => 'a' });
+		const agent = new Agent({
+			getBrain: async () => brain,
+			emitChunk: () => { },
+			approvalGate: gate,
+			persistence,
+			sessionId: 's_test',
+		});
+
+		await agent.runTurn({ correlationId: 't1', text: 'open the file' });
+
+		const messages = persistence.listMessages('s_test');
+		expect(messages.map(m => ({ role: m.role, text: m.text }))).toEqual([
+			{ role: 'user', text: 'open the file' },
+			{ role: 'assistant', text: 'Hello world.' },
+		]);
+		expect(messages[1].stop_reason).toBe('end_turn');
+		const toolCalls = persistence.listToolCallsForSession('s_test');
+		expect(toolCalls).toHaveLength(1);
+		expect(toolCalls[0].tool_name).toBe('Read');
+		expect(toolCalls[0].tool_use_id).toBe('tu1');
+		expect(toolCalls[0].result_content).toBe('file bytes');
+		expect(toolCalls[0].result_is_error).toBe(0);
+	});
+
+	it('does not persist when persistence is omitted', async () => {
+		// Sanity check that the optional wiring stays optional — exercising
+		// the production-shape AgentDeps without a persistence handle must
+		// neither throw nor swallow events.
+		const { brain } = scriptedBrain([
+			{ kind: 'text', text: 'hi' },
+			{ kind: 'done' },
+		]);
+		const { agent, captured } = buildHarness(brain);
+		const result = await agent.runTurn({ correlationId: 't1', text: 'hi' });
+		expect(result.subtype).toBe('success');
+		expect(captured.chunks.some(c => c.kind === 'text')).toBe(true);
 	});
 
 	it('reuses the brain across turns (getBrain runs once)', async () => {
