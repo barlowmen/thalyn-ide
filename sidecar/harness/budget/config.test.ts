@@ -78,7 +78,7 @@ describe('parseBudgetConfig', () => {
 		expect(() => parseBudgetConfig(bad)).toThrow(/preflight_prompt_cap/);
 	});
 
-	it('loads the day-one categories from the committed budgets.yaml', async () => {
+	it('loads every category declared in the committed budgets.yaml', async () => {
 		const { readFile } = await import('node:fs/promises');
 		const { resolve } = await import('node:path');
 		const yamlPath = resolve(__dirname, '../../config/budgets.yaml');
