@@ -15,7 +15,7 @@ import type {
 } from '../brain/types';
 import type { ToolDispatcher } from '../tools/dispatcher';
 import type { ToolSchema } from '../tools/types';
-import { drainWorker, WorkerDispatcher, type WorkerDispatcherDeps } from './dispatcher';
+import { budgetCategoryForModel, drainWorker, WorkerDispatcher, type WorkerDispatcherDeps } from './dispatcher';
 import { registerAllRoles } from './roles';
 import type {
 	CentralBrainFactory,
@@ -31,6 +31,8 @@ const noopFactory: CentralBrainFactory = {
 };
 
 const noopTools = {} as unknown as ToolDispatcher;
+
+const TEST_SESSION_ID = 's_test';
 
 function makeSchema(name: string): ToolSchema {
 	return {
@@ -67,6 +69,8 @@ const fastRetryPolicy: RetryPolicy = {
 interface CreateCall {
 	readonly model: string;
 	readonly brain: CentralBrain;
+	readonly budgetCategory: string;
+	readonly sessionId: string;
 }
 
 interface SendCall {
@@ -84,7 +88,7 @@ function makeFactory(script: Script): {
 	const creates: CreateCall[] = [];
 	const sends: SendCall[] = [];
 	const factory: CentralBrainFactory = {
-		create: ({ model }) => {
+		create: ({ model, budgetCategory, sessionId }) => {
 			const brain: CentralBrain = {
 				async *send(request) {
 					const call: SendCall = { model, request };
@@ -92,7 +96,7 @@ function makeFactory(script: Script): {
 					yield* script(call);
 				},
 			};
-			creates.push({ model, brain });
+			creates.push({ model, brain, budgetCategory, sessionId });
 			return brain;
 		},
 	};
@@ -107,6 +111,7 @@ function makeDispatcher(
 		{
 			brainFactory: deps.brainFactory ?? noopFactory,
 			tools: deps.tools ?? makeTools(defaultToolNames),
+			sessionId: deps.sessionId ?? TEST_SESSION_ID,
 		},
 		overrides,
 	);
@@ -126,13 +131,13 @@ async function collect(
 
 describe('WorkerDispatcher — role registration', () => {
 	it('registers the four built-in roles with defaults from their modules', () => {
-		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools });
+		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID });
 		registerAllRoles(dispatcher);
 		expect(dispatcher.roleIds()).toEqual(['researcher', 'implementer', 'reviewer', 'tester']);
 	});
 
 	it('defaults every registered role to Opus', () => {
-		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools });
+		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID });
 		registerAllRoles(dispatcher);
 		for (const id of dispatcher.roleIds()) {
 			expect(dispatcher.effectiveRole(id).model).toBe('opus');
@@ -140,19 +145,19 @@ describe('WorkerDispatcher — role registration', () => {
 	});
 
 	it('rejects duplicate role registration', () => {
-		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools });
+		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID });
 		registerAllRoles(dispatcher);
 		expect(() => registerAllRoles(dispatcher)).toThrow(/Role already registered/);
 	});
 
 	it('throws a clear error for unknown role ids', () => {
-		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools });
+		const dispatcher = new WorkerDispatcher({ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID });
 		expect(() => dispatcher.effectiveRole('nonexistent')).toThrow(/Unknown role/);
 	});
 
 	it('applies workers.yaml model overrides on top of registered defaults', () => {
 		const dispatcher = new WorkerDispatcher(
-			{ brainFactory: noopFactory, tools: noopTools },
+			{ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID },
 			{ roles: { researcher: { model: 'sonnet' } } },
 		);
 		registerAllRoles(dispatcher);
@@ -162,7 +167,7 @@ describe('WorkerDispatcher — role registration', () => {
 
 	it('applies workers.yaml allowlist overrides by replacement (not deep-merge)', () => {
 		const dispatcher = new WorkerDispatcher(
-			{ brainFactory: noopFactory, tools: noopTools },
+			{ brainFactory: noopFactory, tools: noopTools, sessionId: TEST_SESSION_ID },
 			{ roles: { researcher: { allowlist: ['read_file'] } } },
 		);
 		registerAllRoles(dispatcher);
@@ -272,6 +277,7 @@ describe('WorkerDispatcher.spawn — isolated execution', () => {
 		const dispatcher = new WorkerDispatcher({
 			brainFactory: noopFactory,
 			tools: makeTools(['read_file']),
+			sessionId: TEST_SESSION_ID,
 		});
 		registerAllRoles(dispatcher);
 		expect(() => dispatcher.spawn('implementer', 'task', [])).toThrow(
@@ -360,6 +366,7 @@ describe('WorkerDispatcher.spawn — retry wrapping', () => {
 		const dispatcher = new WorkerDispatcher({
 			brainFactory: factory,
 			tools: makeTools(defaultToolNames),
+			sessionId: TEST_SESSION_ID,
 		});
 		dispatcher.registerRole(custom);
 
@@ -367,6 +374,52 @@ describe('WorkerDispatcher.spawn — retry wrapping', () => {
 
 		expect(attempt).toBe(1);
 		expect(result.error?.kind).toBe('network');
+	});
+});
+
+describe('WorkerDispatcher — budget category resolution', () => {
+	it('maps Anthropic model aliases and ids to subagent_* categories', () => {
+		expect(budgetCategoryForModel('opus')).toBe('subagent_opus');
+		expect(budgetCategoryForModel('sonnet')).toBe('subagent_sonnet');
+		expect(budgetCategoryForModel('haiku')).toBe('subagent_haiku');
+		expect(budgetCategoryForModel('claude-opus-4-7')).toBe('subagent_opus');
+		expect(budgetCategoryForModel('claude-sonnet-4-6')).toBe('subagent_sonnet');
+	});
+
+	it('maps multi-provider workers to their categories', () => {
+		expect(budgetCategoryForModel('gemini-2.5-pro')).toBe('gemini');
+		expect(budgetCategoryForModel('grok-4')).toBe('grok');
+		expect(budgetCategoryForModel('llama-3.3-70b')).toBe('local_inference');
+	});
+
+	it('throws for unknown models so unmetered spend is impossible', () => {
+		expect(() => budgetCategoryForModel('mystery-9000')).toThrow(/Cannot resolve budget category/);
+	});
+
+	it('forwards budgetCategory and sessionId through the brain factory on spawn', async () => {
+		const { factory, creates } = makeFactory(async function* () {
+			yield { kind: 'done' };
+		});
+		const dispatcher = new WorkerDispatcher(
+			{ brainFactory: factory, tools: makeTools(defaultToolNames), sessionId: 's_alpha' },
+		);
+		registerAllRoles(dispatcher);
+
+		await drainWorker(dispatcher.spawn('researcher', 't', [], { retry: false }));
+		expect(creates[0]).toMatchObject({ model: 'opus', budgetCategory: 'subagent_opus', sessionId: 's_alpha' });
+	});
+
+	it('honors a per-spawn sessionId override', async () => {
+		const { factory, creates } = makeFactory(async function* () {
+			yield { kind: 'done' };
+		});
+		const dispatcher = new WorkerDispatcher(
+			{ brainFactory: factory, tools: makeTools(defaultToolNames), sessionId: 's_default' },
+		);
+		registerAllRoles(dispatcher);
+
+		await drainWorker(dispatcher.spawn('researcher', 't', [], { retry: false, sessionId: 's_override' }));
+		expect(creates[0].sessionId).toBe('s_override');
 	});
 });
 

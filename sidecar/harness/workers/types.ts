@@ -76,6 +76,13 @@ export interface SpawnOptions {
 	 * tests. Replaces the effective role's model for this call.
 	 */
 	readonly model?: string;
+	/**
+	 * Override the session id the brain factory receives for this spawn.
+	 * Defaults to `WorkerDispatcherDeps.sessionId`. Lets a parent thread
+	 * its own session id into a worker — useful only when test fixtures
+	 * need deterministic ledger attribution.
+	 */
+	readonly sessionId?: string;
 }
 
 /**
@@ -138,6 +145,17 @@ export interface CentralBrainFactory {
 export interface CentralBrainFactoryParams {
 	/** Effective model for this worker, post-override resolution. */
 	readonly model: string;
+	/**
+	 * Budget category resolved from the effective model
+	 * (`subagent_opus`, `subagent_sonnet`, `gemini`, …). The factory
+	 * forwards this into the constructed adapter so its meter
+	 * reservations land in the correct ledger bucket. Brain-agnostic by
+	 * construction — the dispatcher computes the category and the factory
+	 * only has to pass it through.
+	 */
+	readonly budgetCategory: string;
+	/** Session id the meter reservations and OTEL spans tag onto. */
+	readonly sessionId: string;
 }
 
 /**

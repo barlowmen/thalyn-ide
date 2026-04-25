@@ -133,7 +133,9 @@ export class WorkerDispatcher {
 			{ role: 'user', content: [{ type: 'text', text: task }] },
 		];
 
-		const rawBrain = this.deps.brainFactory.create({ model });
+		const budgetCategory = budgetCategoryForModel(model);
+		const sessionId = options?.sessionId ?? this.deps.sessionId;
+		const rawBrain = this.deps.brainFactory.create({ model, budgetCategory, sessionId });
 		const retry = resolveRetryPolicy(effective.retry, options?.retry);
 		const brain = retry === false ? rawBrain : withRetry(rawBrain, retry);
 
@@ -177,6 +179,12 @@ export interface WorkerDispatcherDeps {
 	 * schemas down to the effective role's allowlist.
 	 */
 	readonly tools: Pick<ToolDispatcher, 'schemaFor'>;
+	/**
+	 * Default session id used when {@link SpawnOptions.sessionId} is
+	 * absent. Reservations and OTEL spans tag onto this value so the UI
+	 * strip can attribute spend to the active session.
+	 */
+	readonly sessionId: string;
 }
 
 /**
@@ -209,6 +217,36 @@ function resolveRetryPolicy(
 		return roleRetry;
 	}
 	return DEFAULT_RETRY_POLICY;
+}
+
+/**
+ * Resolve the budget category from an effective-role model id. The map
+ * is intentionally explicit — silently routing an unrecognised model to
+ * a default bucket would let spend escape the meter the user thinks
+ * they configured. Aliases (`opus`, `sonnet`, `haiku`) map to the
+ * `subagent_*` categories that match the worker dispatch path.
+ */
+export function budgetCategoryForModel(model: string): string {
+	const lower = model.toLowerCase();
+	if (lower === 'opus' || lower.startsWith('claude-opus')) {
+		return 'subagent_opus';
+	}
+	if (lower === 'sonnet' || lower.startsWith('claude-sonnet')) {
+		return 'subagent_sonnet';
+	}
+	if (lower === 'haiku' || lower.startsWith('claude-haiku')) {
+		return 'subagent_haiku';
+	}
+	if (lower.startsWith('gemini')) {
+		return 'gemini';
+	}
+	if (lower.startsWith('grok')) {
+		return 'grok';
+	}
+	if (lower.startsWith('llama')) {
+		return 'local_inference';
+	}
+	throw new Error(`Cannot resolve budget category for model: ${model}`);
 }
 
 interface WorkerRunInit {
