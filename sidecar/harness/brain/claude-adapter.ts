@@ -3,6 +3,14 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { SpanStatusCode, type Span, type Tracer } from '@opentelemetry/api';
+
+import type { BudgetMeter } from '../budget/meter';
+import type { CallDescriptor, Estimate, Reservation } from '../budget/types';
+import {
+	buildGenAiAttributes,
+	buildGenAiCompletionAttributes,
+} from '../observability/genai-attributes';
 import type {
 	BrainContent,
 	BrainError,
@@ -90,6 +98,42 @@ export interface ClaudeAdapterDeps {
 	readonly env?: Record<string, string | undefined>;
 	/** Optional model override. Defaults to whatever the SDK chooses. */
 	readonly model?: string;
+	/**
+	 * Budget instrumentation. When present, every `send()` reserves a
+	 * cost-bearing slot, opens a GenAI span, and either commits or rolls
+	 * back depending on the terminal event. Optional so a non-metering
+	 * fast-path remains available for tests and future direct uses where
+	 * the call is metered out-of-band.
+	 */
+	readonly budget?: ClaudeAdapterBudgetDeps;
+}
+
+/**
+ * Budget wiring for the adapter. The `category` and `sessionId` are fixed
+ * at construction time — one adapter per logical brain → one category
+ * (`subagent_opus`, `subagent_sonnet`, …) — and the meter / tracer are
+ * shared across the harness.
+ *
+ * `estimateCall` builds the {@link CallDescriptor} the meter passes to
+ * the estimator. The adapter has the actual `BrainRequest` so it can
+ * inspect message lengths, attached tool schemas, and any caller-
+ * supplied output ceilings; isolating that logic here keeps the adapter
+ * free of estimator-specific knowledge.
+ */
+export interface ClaudeAdapterBudgetDeps {
+	readonly meter: BudgetMeter;
+	readonly tracer: Tracer;
+	readonly category: string;
+	readonly sessionId: string;
+	readonly system: string;
+	readonly estimateCall: (request: BrainRequest, model: string | undefined) => CallDescriptor;
+	/**
+	 * Compute the call's actual cost from a successful turn. Defaults to
+	 * the reservation's estimate if omitted — better than nothing for the
+	 * SQLite ledger, replaceable when the SDK starts surfacing real
+	 * usage numbers.
+	 */
+	readonly resolveActual?: (estimate: Estimate, reservation: Reservation) => number;
 }
 
 /**
@@ -124,10 +168,17 @@ export class ClaudeAdapter implements CentralBrain {
 			return;
 		}
 
+		const reservationCtx = await this.tryReserve(request);
+		if (reservationCtx?.kind === 'rejected') {
+			yield errorEvent(reservationCtx.error);
+			return;
+		}
+
 		const abortController = new AbortController();
 		const abortForCaller = () => abortController.abort();
 		if (request.signal) {
 			if (request.signal.aborted) {
+				this.releaseOnEarlyExit(reservationCtx, 'cancelled');
 				yield errorEvent(cancelledError());
 				return;
 			}
@@ -153,16 +204,20 @@ export class ClaudeAdapter implements CentralBrain {
 			});
 		} catch (err) {
 			request.signal?.removeEventListener('abort', abortForCaller);
-			yield errorEvent(classifyError(err));
+			const error = classifyError(err);
+			this.releaseOnEarlyExit(reservationCtx, error.kind, error.message);
+			yield errorEvent(error);
 			return;
 		}
 
 		let sessionId: string | undefined;
 		let stopReason: string | undefined;
+		let outcome: TurnOutcome = { kind: 'pending' };
 
 		try {
 			for await (const message of iterator) {
 				if (request.signal?.aborted) {
+					outcome = { kind: 'cancelled' };
 					yield errorEvent(cancelledError());
 					return;
 				}
@@ -191,9 +246,11 @@ export class ClaudeAdapter implements CentralBrain {
 				}
 				if (message.type === 'result') {
 					if (message.subtype !== 'success' || message.is_error) {
+						const msg = message.result ?? 'Claude turn ended with an error.';
+						outcome = { kind: 'error', error: { kind: 'unknown', message: msg } };
 						yield errorEvent({
 							kind: 'unknown',
-							message: message.result ?? 'Claude turn ended with an error.',
+							message: msg,
 							retriable: false,
 						});
 						return;
@@ -207,16 +264,116 @@ export class ClaudeAdapter implements CentralBrain {
 				// session init). The brain contract does not expose them.
 			}
 			if (request.signal?.aborted) {
+				outcome = { kind: 'cancelled' };
 				yield errorEvent(cancelledError());
 				return;
 			}
+			outcome = { kind: 'success', stopReason };
 			yield { kind: 'done', sessionId, stopReason };
 		} catch (err) {
-			yield errorEvent(classifyError(err, request.signal));
+			const error = classifyError(err, request.signal);
+			outcome = { kind: 'error', error };
+			yield errorEvent(error);
 		} finally {
 			request.signal?.removeEventListener('abort', abortForCaller);
+			this.finalizeReservation(reservationCtx, outcome);
 		}
 	}
+
+	private async tryReserve(request: BrainRequest): Promise<ActiveReservation | RejectedReservation | undefined> {
+		const budget = this.deps.budget;
+		if (!budget) {
+			return undefined;
+		}
+		const call = budget.estimateCall(request, this.deps.model);
+		try {
+			const { reservation, estimate } = await budget.meter.reserve(
+				budget.category,
+				call,
+				{ sessionId: budget.sessionId },
+			);
+			const span = budget.tracer.startSpan(`chat ${this.deps.model ?? budget.category}`);
+			span.setAttributes(buildGenAiAttributes({
+				system: 'anthropic',
+				requestModel: this.deps.model ?? 'unknown',
+				sessionId: budget.sessionId,
+				reservation,
+				inputTokens: call.inputTokens,
+				maxOutputTokens: call.maxOutputTokens,
+			}));
+			return { kind: 'active', reservation, estimate, call, span };
+		} catch (err) {
+			return { kind: 'rejected', error: budgetErrorToBrainError(err) };
+		}
+	}
+
+	private releaseOnEarlyExit(
+		ctx: ActiveReservation | RejectedReservation | undefined,
+		errorKind: BrainError['kind'],
+		message?: string,
+	): void {
+		if (!ctx || ctx.kind !== 'active') {
+			return;
+		}
+		this.finalizeReservation(ctx, { kind: 'error', error: { kind: errorKind, message: message ?? errorKind } });
+	}
+
+	private finalizeReservation(
+		ctx: ActiveReservation | RejectedReservation | undefined,
+		outcome: TurnOutcome,
+	): void {
+		if (!ctx || ctx.kind !== 'active') {
+			return;
+		}
+		const budget = this.deps.budget!;
+		const { reservation, estimate, call, span } = ctx;
+		if (outcome.kind === 'success') {
+			const actual = budget.resolveActual ? budget.resolveActual(estimate, reservation) : estimate.value;
+			budget.meter.commit(reservation, actual);
+			span.setAttributes(buildGenAiCompletionAttributes({
+				responseModel: this.deps.model,
+				outputTokens: call.maxOutputTokens,
+				finishReason: outcome.stopReason,
+				actualCost: actual,
+			}));
+			span.setStatus({ code: SpanStatusCode.OK });
+		} else {
+			budget.meter.rollback(reservation);
+			span.setStatus({
+				code: SpanStatusCode.ERROR,
+				message: outcome.kind === 'error' ? outcome.error.message : outcome.kind,
+			});
+		}
+		span.end();
+	}
+}
+
+interface ActiveReservation {
+	readonly kind: 'active';
+	readonly reservation: Reservation;
+	readonly estimate: Estimate;
+	readonly call: CallDescriptor;
+	readonly span: Span;
+}
+
+interface RejectedReservation {
+	readonly kind: 'rejected';
+	readonly error: BrainError;
+}
+
+type TurnOutcome =
+	| { readonly kind: 'pending' }
+	| { readonly kind: 'success'; readonly stopReason?: string }
+	| { readonly kind: 'cancelled' }
+	| { readonly kind: 'error'; readonly error: { readonly kind: BrainError['kind']; readonly message: string } };
+
+function budgetErrorToBrainError(err: unknown): BrainError {
+	const message = err instanceof Error ? err.message : String(err);
+	const code = (err as { code?: unknown }).code;
+	if (typeof code === 'string' && code.startsWith('BUDGET_')) {
+		return { kind: 'unknown', message, retriable: false, cause: err };
+	}
+	return { kind: 'unknown', message, retriable: false, cause: err };
 }
 
 function extractLastUserPrompt(messages: readonly BrainMessage[]): string | undefined {
