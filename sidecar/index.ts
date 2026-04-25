@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { trace as otelTrace, type Tracer } from '@opentelemetry/api';
+import type { Tracer } from '@opentelemetry/api';
 import { randomUUID } from 'crypto';
 import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
@@ -22,6 +22,8 @@ import { BudgetMeter } from './harness/budget/meter';
 import type { BudgetConfig, CallDescriptor } from './harness/budget/types';
 import { RulesLoader } from './harness/memory/rules-loader';
 import { SdkMemory } from './harness/memory/sdk-memory';
+import { SqliteSpanExporter } from './harness/observability/otel-sqlite-exporter';
+import { HarnessTracerProvider } from './harness/observability/tracer';
 import { Persistence } from './harness/persistence';
 import { ApprovalGate } from './harness/tools/approval';
 import { loadAnthropicApiKey } from './keychain';
@@ -64,12 +66,28 @@ export async function main(): Promise<void> {
 
 	const gate = buildApprovalGate(server);
 	const budget = await buildBudgetSubsystem(server, paths);
-	const tracer = otelTrace.getTracer('thalyn-sidecar');
+	const tracerProvider = buildTracerProvider(budget.persistence);
+	const tracer = tracerProvider.getTracer('thalyn-sidecar');
 	const memory = await buildMemoryWiring(process.cwd());
 	const agent = buildAgent(server, gate, budget, tracer, defaultSdkLoader, {
 		systemPrompt: memory.systemPrompt,
 		memoryDirectory: memory.memoryDirectory,
 	});
+
+	// Best-effort flush of in-flight spans on graceful shutdown so the
+	// last few seconds of a turn don't drop. SIGKILL bypasses this; for
+	// that, the SimpleSpanProcessor inside HarnessTracerProvider writes
+	// every span synchronously when it ends, so the loss window is at
+	// most one in-flight span.
+	const shutdown = async (): Promise<void> => {
+		try {
+			await tracerProvider.shutdown();
+		} catch {
+			// Ignore — we're going down anyway.
+		}
+	};
+	process.once('SIGTERM', () => { void shutdown().then(() => process.exit(0)); });
+	process.once('SIGINT', () => { void shutdown().then(() => process.exit(0)); });
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
 		params => agent.runTurn(params),
@@ -158,6 +176,21 @@ export function buildAgent(
 		emitChunk: params => server.notify('message.chunk', params),
 		approvalGate: gate,
 		systemPrompt: wiring.systemPrompt,
+	});
+}
+
+/**
+ * Construct the harness tracer, registering the SQLite exporter so every
+ * GenAI span lands in the session DB's `traces` table alongside the
+ * budget ledger. SQLite is the system of record; additional exporters
+ * (Langfuse, Helicone, Datadog, SigNoz) plug in via standard OTEL
+ * exporters with one call to `tracerProvider.addExporter(...)`.
+ */
+export function buildTracerProvider(persistence: Persistence): HarnessTracerProvider {
+	return new HarnessTracerProvider({
+		serviceName: 'thalyn-sidecar',
+		serviceVersion: '0.3.0',
+		exporters: [new SqliteSpanExporter(persistence)],
 	});
 }
 
