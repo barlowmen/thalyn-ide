@@ -80,6 +80,22 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 			return `Run shell: ${truncate(command, 120)}`;
 		},
 	},
+	{
+		// Surfaced to the brain as `mcp__thalyn__spawn_worker` because the
+		// harness registers `spawn_worker` through the SDK's in-process
+		// MCP server (server name "thalyn"); the SDK prefixes MCP tools.
+		name: 'mcp__thalyn__spawn_worker',
+		tier: 'external',
+		requiresApproval: true,
+		summarize: input => {
+			const role = pickString(input, 'role') ?? '<unknown>';
+			const task = pickString(input, 'task');
+			if (!task) {
+				return `Spawn ${role} worker`;
+			}
+			return `Spawn ${role} worker: ${truncate(task, 100)}`;
+		},
+	},
 ];
 
 const BY_NAME = new Map<string, ToolDefinition>(

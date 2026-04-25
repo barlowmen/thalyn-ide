@@ -88,6 +88,13 @@ export interface ClaudeQueryOptions {
 	 * `settings.json` cannot widen tool permissions.
 	 */
 	readonly settings?: Record<string, unknown>;
+	/**
+	 * MCP server configurations forwarded to the SDK's `mcpServers`
+	 * option. Each entry surfaces its tools to the brain as
+	 * `mcp__<server>__<tool>` and is what the harness uses to inject
+	 * harness-side built-ins (today: `spawn_worker`).
+	 */
+	readonly mcpServers?: Record<string, unknown>;
 }
 
 /**
@@ -156,6 +163,13 @@ export interface ClaudeAdapterDeps {
 	 * directory without enabling `settingSources: ['user']`.
 	 */
 	readonly settings?: Record<string, unknown>;
+	/**
+	 * MCP server map forwarded to the SDK's `mcpServers` option. Lets the
+	 * harness inject in-process built-ins like `spawn_worker` (registered
+	 * via `createSdkMcpServer`) so the brain sees them as tools alongside
+	 * the SDK's native ones.
+	 */
+	readonly mcpServers?: Record<string, unknown>;
 	/**
 	 * Budget instrumentation. When present, every `send()` reserves a
 	 * cost-bearing slot, opens a GenAI span, and either commits or rolls
@@ -261,6 +275,7 @@ export class ClaudeAdapter implements CentralBrain {
 					permissionMode: this.deps.permissionMode ?? 'default',
 					canUseTool: this.deps.canUseTool,
 					settings: this.deps.settings,
+					mcpServers: this.deps.mcpServers,
 					// Opt out of user/project settings files so a stray
 					// `~/.claude/settings.json` allowlist cannot widen the
 					// adapter's permissions behind the harness's back. The

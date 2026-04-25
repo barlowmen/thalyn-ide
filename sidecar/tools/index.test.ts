@@ -7,8 +7,10 @@ import { describe, expect, it } from 'vitest';
 import { allowedTools, enabledTools, getToolDefinition, TOOL_DEFINITIONS } from './index';
 
 describe('tool definitions', () => {
-	it('declares exactly Read, Write, Edit, and Bash', () => {
-		expect(TOOL_DEFINITIONS.map(t => t.name)).toEqual(['Read', 'Write', 'Edit', 'Bash']);
+	it('declares the harness tool surface', () => {
+		expect(TOOL_DEFINITIONS.map(t => t.name)).toEqual(
+			['Read', 'Write', 'Edit', 'Bash', 'mcp__thalyn__spawn_worker'],
+		);
 	});
 
 	it('auto-approves only the `read` tier', () => {
@@ -16,7 +18,17 @@ describe('tool definitions', () => {
 	});
 
 	it('enables every defined tool for the agent', () => {
-		expect(enabledTools()).toEqual(['Read', 'Write', 'Edit', 'Bash']);
+		expect(enabledTools()).toEqual(
+			['Read', 'Write', 'Edit', 'Bash', 'mcp__thalyn__spawn_worker'],
+		);
+	});
+
+	it('summarises spawn_worker with role and truncated task', () => {
+		const def = getToolDefinition('mcp__thalyn__spawn_worker');
+		expect(def).toBeDefined();
+		expect(def!.tier).toBe('external');
+		expect(def!.summarize({ role: 'researcher', task: 'find the bug' }))
+			.toBe('Spawn researcher worker: find the bug');
 	});
 
 	it('gates destructive tools behind approval', () => {

@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
+import { z } from 'zod';
 import { Agent } from './agent';
 import {
 	ClaudeAdapter,
@@ -15,7 +16,7 @@ import {
 	type ClaudePermissionResult,
 	type ClaudeQueryFn,
 } from './harness/brain/claude-adapter';
-import type { BrainRequest } from './harness/brain/types';
+import type { BrainRequest, CentralBrain } from './harness/brain/types';
 import { loadBudgetConfigWithOverride } from './harness/budget/config';
 import { DefaultEstimator } from './harness/budget/estimator';
 import { BudgetMeter } from './harness/budget/meter';
@@ -26,6 +27,13 @@ import { SqliteSpanExporter } from './harness/observability/otel-sqlite-exporter
 import { HarnessTracerProvider } from './harness/observability/tracer';
 import { Persistence } from './harness/persistence';
 import { ApprovalGate } from './harness/tools/approval';
+import { loadWorkersConfig } from './harness/workers/config';
+import { type WorkerDispatcher } from './harness/workers/dispatcher';
+import {
+	buildWorkerDispatcher,
+	runSpawnWorker,
+} from './harness/workers/spawn-worker-tool';
+import type { CentralBrainFactory, CentralBrainFactoryParams } from './harness/workers/types';
 import { loadAnthropicApiKey } from './keychain';
 import { allowedTools as harnessAllowedTools, enabledTools, getToolDefinition } from './tools';
 import type {
@@ -69,9 +77,60 @@ export async function main(): Promise<void> {
 	const tracerProvider = buildTracerProvider(budget.persistence);
 	const tracer = tracerProvider.getTracer('thalyn-sidecar');
 	const memory = await buildMemoryWiring(process.cwd());
-	const agent = buildAgent(server, gate, budget, tracer, defaultSdkLoader, {
-		systemPrompt: memory.systemPrompt,
-		memoryDirectory: memory.memoryDirectory,
+
+	const sdk = await defaultSdkLoader();
+	const apiKey = await loadAnthropicApiKey();
+	// When no Thalyn-managed key is configured, pass process.env through
+	// unchanged so the bundled Claude Code CLI can authenticate using the
+	// OAuth tokens it manages under ~/.claude/.
+	const env: NodeJS.ProcessEnv = apiKey
+		? { ...process.env, ANTHROPIC_API_KEY: apiKey.key }
+		: { ...process.env };
+
+	const workerDispatcher = await buildWorkerSubsystem({
+		sdk, env, budget, tracer, paths,
+	});
+	const mcpServers = {
+		thalyn: sdk.createSdkMcpServer({
+			name: 'thalyn',
+			version: '0.3.0',
+			tools: [
+				sdk.tool(
+					'spawn_worker',
+					[
+						'Delegate a bounded task to a sub-agent worker. Returns the',
+						'worker\'s text response after it finishes. Use a role that',
+						'matches the task: `researcher` for read-only investigation,',
+						'`implementer` for write actions, `reviewer` for read-only',
+						'critique, `tester` for running tests. The worker has its',
+						'own context window and tool allowlist; it cannot see this',
+						'conversation\'s history.',
+					].join(' '),
+					{
+						role: z.enum(['researcher', 'implementer', 'reviewer', 'tester']),
+						task: z.string(),
+					},
+					async (args: unknown) => {
+						const { role, task } = args as { role: 'researcher' | 'implementer' | 'reviewer' | 'tester'; task: string };
+						const out = await runSpawnWorker(workerDispatcher, { role, task });
+						return {
+							content: [{ type: 'text', text: out.text }],
+							isError: out.isError,
+						};
+					},
+				),
+			],
+		}),
+	};
+
+	const agent = buildAgent({
+		server, gate, budget, tracer,
+		sdk, env,
+		wiring: {
+			systemPrompt: memory.systemPrompt,
+			memoryDirectory: memory.memoryDirectory,
+			mcpServers,
+		},
 	});
 
 	// Best-effort flush of in-flight spans on graceful shutdown so the
@@ -132,50 +191,62 @@ export function buildApprovalGate(server: RpcServer): ApprovalGate {
 
 /**
  * Wiring resolved at session start that the Agent and adapter both
- * consume. Loaded once because per-session semantics: rule files and
- * the memory directory don't change mid-session.
+ * consume. Loaded once because per-session semantics: rule files, the
+ * memory directory, and MCP server bindings don't change mid-session.
  */
 export interface AgentWiring {
 	/** Three-layer rules concatenated into a system-prompt prefix. */
 	readonly systemPrompt: string;
 	/** Absolute path the SDK Memory Tool should write to. */
 	readonly memoryDirectory: string;
+	/**
+	 * Inline MCP servers to register with the SDK. The harness uses this
+	 * to inject `spawn_worker` (and any future built-ins) so the brain
+	 * sees them as `mcp__<server>__<tool>`.
+	 */
+	readonly mcpServers: Record<string, unknown>;
 	/** Defaults to {@link DEFAULT_BRAIN_MODEL} when omitted. */
 	readonly model?: string;
 }
 
+export interface BuildAgentOptions {
+	readonly server: RpcServer;
+	readonly gate: ApprovalGate;
+	readonly budget: BudgetSubsystem;
+	readonly tracer: Tracer;
+	readonly sdk: SdkSurface;
+	readonly env: NodeJS.ProcessEnv;
+	readonly wiring: AgentWiring;
+}
+
 /**
- * Constructs an Agent driving a {@link ClaudeAdapter}-backed brain. The
- * SDK loader is injected so tests can substitute a fake; production
- * supplies `defaultSdkLoader`, which dynamically imports
- * `@anthropic-ai/claude-agent-sdk` and reads the API key from Keychain
- * (with an env-var fallback) on the first turn.
+ * Constructs an Agent driving a {@link ClaudeAdapter}-backed brain.
  *
- * The adapter is built lazily on the first message so sidecar bootstrap
- * doesn't trigger a Keychain prompt or pull the SDK into memory until
- * the user actually sends a message. After that, every turn shares the
- * same adapter (and therefore the same SDK session, budget meter, and
- * approval gate state).
+ * The SDK is injected pre-loaded so the worker subsystem (built before
+ * this) can share the same `query` and `createSdkMcpServer` references.
+ * Every turn shares the same adapter (and therefore the same SDK
+ * session, budget meter, approval gate state, and rule-loaded system
+ * prompt).
  */
-export function buildAgent(
-	server: RpcServer,
-	gate: ApprovalGate,
-	budget: BudgetSubsystem,
-	tracer: Tracer,
-	sdkLoader: () => Promise<ClaudeQueryFn>,
-	wiring: AgentWiring,
-): Agent {
-	const canUseTool = buildCanUseTool(server, gate);
-	const model = wiring.model ?? DEFAULT_BRAIN_MODEL;
+export function buildAgent(opts: BuildAgentOptions): Agent {
+	const canUseTool = buildCanUseTool(opts.server, opts.gate);
+	const model = opts.wiring.model ?? DEFAULT_BRAIN_MODEL;
+	const adapter = buildPrimaryAdapter({
+		sdk: opts.sdk,
+		env: opts.env,
+		budget: opts.budget,
+		tracer: opts.tracer,
+		model,
+		canUseTool,
+		memoryDirectory: opts.wiring.memoryDirectory,
+		mcpServers: opts.wiring.mcpServers,
+	});
 
 	return new Agent({
-		getBrain: buildBrainLoader({
-			server, gate, budget, tracer, sdkLoader, model, canUseTool,
-			memoryDirectory: wiring.memoryDirectory,
-		}),
-		emitChunk: params => server.notify('message.chunk', params),
-		approvalGate: gate,
-		systemPrompt: wiring.systemPrompt,
+		getBrain: async () => adapter,
+		emitChunk: params => opts.server.notify('message.chunk', params),
+		approvalGate: opts.gate,
+		systemPrompt: opts.wiring.systemPrompt,
 	});
 }
 
@@ -219,64 +290,118 @@ export async function buildMemoryWiring(workspaceDir: string): Promise<{
 /** Default Claude model used by the primary-brain adapter. */
 export const DEFAULT_BRAIN_MODEL = 'claude-opus-4-7';
 
-interface BrainLoaderDeps {
-	readonly server: RpcServer;
-	readonly gate: ApprovalGate;
+/**
+ * Narrow handle on the `@anthropic-ai/claude-agent-sdk` exports the
+ * sidecar uses. Captured as a structural type so tests can supply a
+ * fake without dragging in the SDK's full surface and so the worker
+ * subsystem and primary adapter can share one resolved reference.
+ */
+export interface SdkSurface {
+	readonly query: ClaudeQueryFn;
+	readonly createSdkMcpServer: (options: {
+		name: string;
+		version?: string;
+		tools?: ReadonlyArray<unknown>;
+	}) => unknown;
+	readonly tool: <Schema extends Record<string, unknown>>(
+		name: string,
+		description: string,
+		inputSchema: Schema,
+		handler: (args: unknown, extra: unknown) => Promise<unknown>,
+	) => unknown;
+}
+
+interface BuildPrimaryAdapterDeps {
+	readonly sdk: SdkSurface;
+	readonly env: NodeJS.ProcessEnv;
 	readonly budget: BudgetSubsystem;
 	readonly tracer: Tracer;
-	readonly sdkLoader: () => Promise<ClaudeQueryFn>;
 	readonly model: string;
 	readonly canUseTool: ClaudeCanUseTool;
 	readonly memoryDirectory: string;
+	readonly mcpServers: Record<string, unknown>;
 }
 
 /**
- * Returns a function that resolves a {@link ClaudeAdapter} on first
- * call and caches it for subsequent calls. Defers Keychain access and
- * SDK import to the first turn.
+ * Construct the primary brain adapter the Agent drives. The harness
+ * Agent calls this directly — no laziness — because the SDK and API
+ * key were resolved at sidecar startup so the worker subsystem could
+ * pre-build its `mcpServers` registration before the first turn.
  */
-function buildBrainLoader(deps: BrainLoaderDeps): () => Promise<ClaudeAdapter> {
-	let cached: ClaudeAdapter | undefined;
-	return async () => {
-		if (cached) {
-			return cached;
-		}
-		const apiKey = await loadAnthropicApiKey();
-		const query = await deps.sdkLoader();
-		// When no Thalyn-managed key is configured, pass process.env through
-		// unchanged so the bundled Claude Code CLI can authenticate using the
-		// OAuth tokens it manages under ~/.claude/.
-		const env: NodeJS.ProcessEnv = apiKey
-			? { ...process.env, ANTHROPIC_API_KEY: apiKey.key }
-			: { ...process.env };
-		cached = new ClaudeAdapter({
-			query,
-			cwd: process.cwd(),
-			env,
-			model: deps.model,
-			tools: enabledTools(),
-			allowedTools: harnessAllowedTools(),
-			permissionMode: 'default',
-			canUseTool: deps.canUseTool,
-			// Inline `settings` redirects the SDK Memory Tool to our
-			// harness-managed directory. This is the only place the SDK
-			// reads `autoMemoryDirectory` from when `settingSources` is
-			// `[]` — and we keep `settingSources: []` so a stray
-			// ~/.claude/settings.json cannot widen tool permissions.
-			settings: {
-				autoMemoryDirectory: deps.memoryDirectory,
-			},
-			budget: {
-				meter: deps.budget.meter,
-				tracer: deps.tracer,
-				category: subagentCategoryForModel(deps.model),
-				sessionId: deps.budget.sessionId,
-				system: '',
-				estimateCall: estimateBrainCall,
-			},
-		});
-		return cached;
+function buildPrimaryAdapter(deps: BuildPrimaryAdapterDeps): ClaudeAdapter {
+	return new ClaudeAdapter({
+		query: deps.sdk.query,
+		cwd: process.cwd(),
+		env: deps.env,
+		model: deps.model,
+		tools: enabledTools(),
+		allowedTools: harnessAllowedTools(),
+		permissionMode: 'default',
+		canUseTool: deps.canUseTool,
+		// Inline `settings` redirects the SDK Memory Tool to our
+		// harness-managed directory. This is the only place the SDK
+		// reads `autoMemoryDirectory` from when `settingSources` is
+		// `[]` — and we keep `settingSources: []` so a stray
+		// ~/.claude/settings.json cannot widen tool permissions.
+		settings: {
+			autoMemoryDirectory: deps.memoryDirectory,
+		},
+		mcpServers: deps.mcpServers,
+		budget: {
+			meter: deps.budget.meter,
+			tracer: deps.tracer,
+			category: subagentCategoryForModel(deps.model),
+			sessionId: deps.budget.sessionId,
+			system: '',
+			estimateCall: estimateBrainCall,
+		},
+	});
+}
+
+/**
+ * Build the worker dispatcher subsystem the primary brain delegates
+ * sub-tasks to via `spawn_worker`. The brain factory constructs a
+ * fresh {@link ClaudeAdapter} per spawn so each worker has an isolated
+ * brain, isolated cancellation signal, and its own ledger reservation
+ * — sharing only the meter, tracer, and gate with the parent.
+ */
+async function buildWorkerSubsystem(deps: {
+	readonly sdk: SdkSurface;
+	readonly env: NodeJS.ProcessEnv;
+	readonly budget: BudgetSubsystem;
+	readonly tracer: Tracer;
+	readonly paths: ThalynPaths;
+}): Promise<WorkerDispatcher> {
+	const overrides = await loadWorkersConfig(deps.paths.committedWorkersPath);
+	const brainFactory: CentralBrainFactory = {
+		create: ({ model, budgetCategory, sessionId }: CentralBrainFactoryParams): CentralBrain => {
+			return new ClaudeAdapter({
+				query: deps.sdk.query,
+				cwd: process.cwd(),
+				env: deps.env,
+				model,
+				// Workers do not get the harness allowlist, the canUseTool
+				// hook, or the settings/mcpServers from the parent. Tool
+				// allowlisting is the WorkerDispatcher's job; tool
+				// execution is intentionally unwired pending the dispatcher
+				// pivot. Reservations and OTEL spans still flow through
+				// the shared meter and tracer.
+				budget: {
+					meter: deps.budget.meter,
+					tracer: deps.tracer,
+					category: budgetCategory,
+					sessionId,
+					system: '',
+					estimateCall: estimateBrainCall,
+				},
+			});
+		},
 	};
+	return buildWorkerDispatcher({
+		brainFactory,
+		sessionId: deps.budget.sessionId,
+		overrides,
+	});
 }
 
 /**
@@ -406,6 +531,7 @@ export interface ThalynPaths {
 	readonly configDir: string;
 	readonly committedBudgetsPath: string;
 	readonly budgetsOverridePath: string;
+	readonly committedWorkersPath: string;
 	readonly sessionDbPath: string;
 }
 
@@ -415,13 +541,18 @@ export function thalynPaths(): ThalynPaths {
 		configDir,
 		committedBudgetsPath: join(__dirname, '..', 'config', 'budgets.yaml'),
 		budgetsOverridePath: join(configDir, 'budgets.yaml'),
+		committedWorkersPath: join(__dirname, '..', 'config', 'workers.yaml'),
 		sessionDbPath: join(configDir, 'sessions.db'),
 	};
 }
 
-async function defaultSdkLoader(): Promise<ClaudeQueryFn> {
+async function defaultSdkLoader(): Promise<SdkSurface> {
 	const sdk = await import('@anthropic-ai/claude-agent-sdk');
-	return sdk.query as unknown as ClaudeQueryFn;
+	return {
+		query: sdk.query as unknown as ClaudeQueryFn,
+		createSdkMcpServer: sdk.createSdkMcpServer as unknown as SdkSurface['createSdkMcpServer'],
+		tool: sdk.tool as unknown as SdkSurface['tool'],
+	};
 }
 
 if (require.main === module) {
