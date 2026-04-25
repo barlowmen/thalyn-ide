@@ -21,6 +21,7 @@ import { loadBudgetConfigWithOverride } from './harness/budget/config';
 import { DefaultEstimator } from './harness/budget/estimator';
 import { BudgetMeter } from './harness/budget/meter';
 import type { BudgetConfig, CallDescriptor } from './harness/budget/types';
+import { Analytics } from './harness/memory/analytics';
 import { RulesLoader } from './harness/memory/rules-loader';
 import { SdkMemory } from './harness/memory/sdk-memory';
 import { SqliteSpanExporter } from './harness/observability/otel-sqlite-exporter';
@@ -500,6 +501,11 @@ function estimateBrainCall(request: BrainRequest, model: string | undefined): Ca
  * budget config is the deep-merged result of the committed defaults at
  * `sidecar/config/budgets.yaml` and (when present) the user override at
  * `~/.config/thalyn/budgets.yaml`.
+ *
+ * The {@link Analytics} facade comes packaged on the same {@link Persistence}
+ * so consumers (today: future dashboards; tomorrow: the budget UI strip's
+ * cross-session rollups) read through one cached object instead of
+ * reaching into the database directly.
  */
 export async function buildBudgetSubsystem(server: RpcServer, paths: ThalynPaths): Promise<BudgetSubsystem> {
 	const config = await loadBudgetConfigWithOverride(paths.committedBudgetsPath, paths.budgetsOverridePath);
@@ -512,7 +518,8 @@ export async function buildBudgetSubsystem(server: RpcServer, paths: ThalynPaths
 		now: () => Date.now(),
 		onLedgerChanged: () => server.notify('budget.changed', undefined),
 	});
-	return { config, persistence, meter, sessionId };
+	const analytics = new Analytics(persistence);
+	return { config, persistence, meter, sessionId, analytics };
 }
 
 export interface BudgetSubsystem {
@@ -520,6 +527,7 @@ export interface BudgetSubsystem {
 	readonly persistence: Persistence;
 	readonly meter: BudgetMeter;
 	readonly sessionId: string;
+	readonly analytics: Analytics;
 }
 
 /**
