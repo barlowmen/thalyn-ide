@@ -97,6 +97,22 @@ function validateCategory(name: string, raw: unknown): CategoryCaps {
 		);
 	}
 
+	let preflightPromptCap: number | undefined;
+	if (r.preflight_prompt_cap !== undefined) {
+		const v = r.preflight_prompt_cap;
+		if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+			throw new BudgetConfigError(
+				`Category ${name}.preflight_prompt_cap must be a non-negative finite number (got ${String(v)}).`,
+			);
+		}
+		if (v > caps.per_call_cap) {
+			throw new BudgetConfigError(
+				`Category ${name}: preflight_prompt_cap (${v}) must not exceed per_call_cap (${caps.per_call_cap}). Otherwise the per-call hard block fires before the preflight prompt could.`,
+			);
+		}
+		preflightPromptCap = v;
+	}
+
 	return {
 		unit: unit as Unit,
 		per_call_cap: caps.per_call_cap,
@@ -104,6 +120,7 @@ function validateCategory(name: string, raw: unknown): CategoryCaps {
 		daily_hard_cap: caps.daily_hard_cap,
 		weekly_soft_cap: caps.weekly_soft_cap,
 		weekly_hard_cap: caps.weekly_hard_cap,
+		...(preflightPromptCap !== undefined ? { preflight_prompt_cap: preflightPromptCap } : {}),
 	};
 }
 

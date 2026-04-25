@@ -179,40 +179,54 @@ export interface ToolApprovalReplyParams {
 
 // ---------------------------------------------------------------------------
 // `budget.approval.request` — sidecar → webview, asks the user to approve
-// continuing to spend in a category that has crossed its soft cap.
+// a cost-bearing operation before it runs. Two distinct triggers share this
+// message so the webview renders both through the same approval card:
 //
-// Emitted from the `BudgetMeter` when `reserve()` would push cumulative
-// spend in `window` past the matching `<window>_soft_cap`. The approval
-// is per-category, per-session: once granted with `approve-for-session`
-// the meter stops prompting for that category until session end or until
-// the hard cap fires (hard caps ignore prior soft-cap approvals).
+//   - `soft-cap`: cumulative spend in `window` would cross the matching
+//     `<window>_soft_cap` on reservation. Once granted with
+//     `approve-for-session` the meter stops prompting for that
+//     category+window until session end or until the hard cap fires
+//     (hard caps ignore prior soft-cap approvals).
+//   - `preflight`: a single reservation's estimate exceeds the category's
+//     `preflight_prompt_cap` — the "this one operation is expensive" gate
+//     that fires independently of cumulative spend, so a first-of-the-day
+//     expensive browser-loop or multi-worker spawn still asks. Like
+//     soft-cap approvals, `approve-for-session` silences future preflight
+//     prompts for that category until session end.
 // ---------------------------------------------------------------------------
 
 export type BudgetApprovalRequestMethod = 'budget.approval.request';
 
-/** The rolling window whose soft cap was crossed. */
+/** The rolling window whose soft cap was crossed. Only set for `reason: 'soft-cap'`. */
 export type BudgetWindow = 'daily' | 'weekly';
 
 /** Cap unit for UI rendering. Mirrors `budgets.yaml`'s `unit` field. */
 export type BudgetUnit = 'usd' | 'gpu_seconds';
+
+/** What triggered this approval prompt. Drives the card's copy on the webview side. */
+export type BudgetApprovalReason = 'soft-cap' | 'preflight';
 
 export interface BudgetApprovalRequestParams {
 	/** Unique id minted per approval prompt. Must match on the reply. */
 	readonly correlationId: string;
 	/** Which category would overspend. */
 	readonly category: string;
-	/** Whether it's the daily or weekly soft cap that was crossed. */
-	readonly window: BudgetWindow;
+	/** What triggered the prompt. */
+	readonly reason: BudgetApprovalReason;
 	/** Cap unit — `usd` or `gpu_seconds`. */
 	readonly unit: BudgetUnit;
-	/** Cumulative spend in `window` before this reservation. */
-	readonly currentSpend: number;
 	/** The reservation's estimate, in `unit`. */
 	readonly estimate: number;
-	/** The soft cap value that would be crossed. */
-	readonly softCap: number;
-	/** The matching hard cap for `window`; shown so the user can judge headroom. */
-	readonly hardCap: number;
+	/** Cumulative spend in `window` before this reservation. Present on `soft-cap`. */
+	readonly currentSpend?: number;
+	/** Window whose soft cap was crossed. Present on `soft-cap`. */
+	readonly window?: BudgetWindow;
+	/** The soft cap value that would be crossed. Present on `soft-cap`. */
+	readonly softCap?: number;
+	/** Matching hard cap for `window`; shown for soft-cap headroom context. */
+	readonly hardCap?: number;
+	/** The per-call preflight cap the estimate exceeded. Present on `preflight`. */
+	readonly preflightCap?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,3 +239,44 @@ export interface BudgetApprovalReplyParams {
 	readonly correlationId: string;
 	readonly decision: ApprovalDecision;
 }
+
+// ---------------------------------------------------------------------------
+// `budget.snapshot` — webview → sidecar, returns a point-in-time rollup of
+// every category's daily and weekly spend alongside the caps. The webview
+// calls this on chat-panel open; the sidecar pushes `budget.changed`
+// notifications to invalidate it as ledger rows commit or roll back.
+// ---------------------------------------------------------------------------
+
+export type BudgetSnapshotMethod = 'budget.snapshot';
+
+export type BudgetSnapshotParams = undefined;
+
+export interface BudgetSnapshotResult {
+	/** Server-side wall-clock when the snapshot was assembled. */
+	readonly asOf: number;
+	readonly categories: readonly BudgetCategorySnapshot[];
+}
+
+export interface BudgetCategorySnapshot {
+	readonly category: string;
+	readonly unit: BudgetUnit;
+	readonly dailySpend: number;
+	readonly weeklySpend: number;
+	readonly dailySoftCap: number;
+	readonly dailyHardCap: number;
+	readonly weeklySoftCap: number;
+	readonly weeklyHardCap: number;
+	readonly perCallCap: number;
+	readonly preflightCap?: number;
+}
+
+// ---------------------------------------------------------------------------
+// `budget.changed` — sidecar → webview notification fired when any ledger
+// row transitions (reserve/commit/rollback). Carries no payload; the
+// webview re-fetches via `budget.snapshot`. Keeps the push surface small
+// and keeps the snapshot shape authoritative.
+// ---------------------------------------------------------------------------
+
+export type BudgetChangedMethod = 'budget.changed';
+
+export type BudgetChangedParams = undefined;

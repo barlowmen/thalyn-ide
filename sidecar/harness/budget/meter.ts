@@ -7,6 +7,8 @@ import type {
 	ApprovalDecision,
 	BudgetApprovalReplyParams,
 	BudgetApprovalRequestParams,
+	BudgetCategorySnapshot,
+	BudgetSnapshotResult,
 	BudgetUnit,
 	BudgetWindow,
 } from '../../protocol';
@@ -15,6 +17,7 @@ import type { Estimator } from './estimator';
 import {
 	BudgetHardCapExceeded,
 	BudgetPerCallExceeded,
+	BudgetPreflightDeclined,
 	BudgetSoftCapDeclined,
 	BudgetUnitMismatch,
 	BudgetUnknownCategory,
@@ -51,6 +54,7 @@ import {
 export class BudgetMeter {
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	private readonly softApprovedForSession = new Set<string>(); // `${category}:${window}`
+	private readonly preflightApprovedForSession = new Set<string>(); // `${category}`
 
 	constructor(
 		private readonly config: BudgetConfig,
@@ -105,6 +109,13 @@ export class BudgetMeter {
 			throw new BudgetHardCapExceeded(category, 'weekly', weeklyProjected, caps.weekly_hard_cap, caps.unit);
 		}
 
+		// Preflight runs before soft-cap so a single expensive call asks
+		// even on a fresh window. Once approved-for-session it stops
+		// prompting until the soft cap eventually fires.
+		if (caps.preflight_prompt_cap !== undefined && estimate.value > caps.preflight_prompt_cap) {
+			await this.requirePreflightApproval(category, estimate, caps);
+		}
+
 		if (dailyProjected > caps.daily_soft_cap) {
 			await this.requireSoftApproval(category, 'daily', dailyCurrent, estimate, caps);
 		}
@@ -133,6 +144,7 @@ export class BudgetMeter {
 			traceId: ctx.traceId,
 			spanId: ctx.spanId,
 		};
+		this.deps.onLedgerChanged?.();
 		return { reservation, estimate };
 	}
 
@@ -145,11 +157,41 @@ export class BudgetMeter {
 	commit(reservation: Reservation, actualCost: number, nowMs?: number): void {
 		const ts = nowMs ?? this.deps.now();
 		this.persistence.commitReservation(reservation.id, actualCost, ts);
+		this.deps.onLedgerChanged?.();
 	}
 
 	/** Release `reservation` without committing spend. */
 	rollback(reservation: Reservation): void {
 		this.persistence.rollbackReservation(reservation.id);
+		this.deps.onLedgerChanged?.();
+	}
+
+	/**
+	 * Build a point-in-time snapshot of every configured category's daily
+	 * and weekly spend alongside the caps. Drives the chat-panel budget
+	 * strip and the `budget.snapshot` RPC. Pure read — never prompts,
+	 * never mutates.
+	 */
+	snapshot(nowMs?: number): BudgetSnapshotResult {
+		const now = nowMs ?? this.deps.now();
+		const dailyStart = startOfLocalDay(now);
+		const weeklyStart = now - WEEK_MS;
+		const categories: BudgetCategorySnapshot[] = [];
+		for (const [name, caps] of Object.entries(this.config.categories)) {
+			categories.push({
+				category: name,
+				unit: caps.unit as BudgetUnit,
+				dailySpend: this.persistence.rollup(name, dailyStart, Number.MAX_SAFE_INTEGER),
+				weeklySpend: this.persistence.rollup(name, weeklyStart, Number.MAX_SAFE_INTEGER),
+				dailySoftCap: caps.daily_soft_cap,
+				dailyHardCap: caps.daily_hard_cap,
+				weeklySoftCap: caps.weekly_soft_cap,
+				weeklyHardCap: caps.weekly_hard_cap,
+				perCallCap: caps.per_call_cap,
+				...(caps.preflight_prompt_cap !== undefined ? { preflightCap: caps.preflight_prompt_cap } : {}),
+			});
+		}
+		return { asOf: now, categories };
 	}
 
 	/** Sum of spend in category over the current local day. */
@@ -179,6 +221,11 @@ export class BudgetMeter {
 		return this.softApprovedForSession.has(sessionKey(category, window));
 	}
 
+	/** Test-only hook. */
+	isPreflightApprovedForSession(category: string): boolean {
+		return this.preflightApprovedForSession.has(category);
+	}
+
 	private lookupCategory(category: string): CategoryCaps {
 		const caps = this.config.categories[category];
 		if (!caps) {
@@ -197,20 +244,15 @@ export class BudgetMeter {
 		if (this.softApprovedForSession.has(sessionKey(category, window))) {
 			return;
 		}
-		const correlationId = this.deps.newApprovalId();
-		const decision = await new Promise<ApprovalDecision>(resolve => {
-			this.pendingApprovals.set(correlationId, { resolve });
-			const params: BudgetApprovalRequestParams = {
-				correlationId,
-				category,
-				window,
-				unit: caps.unit as BudgetUnit,
-				currentSpend,
-				estimate: estimate.value,
-				softCap: window === 'daily' ? caps.daily_soft_cap : caps.weekly_soft_cap,
-				hardCap: window === 'daily' ? caps.daily_hard_cap : caps.weekly_hard_cap,
-			};
-			this.deps.requestApproval(params);
+		const decision = await this.requestApproval({
+			category,
+			reason: 'soft-cap',
+			unit: caps.unit as BudgetUnit,
+			estimate: estimate.value,
+			currentSpend,
+			window,
+			softCap: window === 'daily' ? caps.daily_soft_cap : caps.weekly_soft_cap,
+			hardCap: window === 'daily' ? caps.daily_hard_cap : caps.weekly_hard_cap,
 		});
 		if (decision === 'approve') {
 			return;
@@ -221,6 +263,42 @@ export class BudgetMeter {
 		}
 		throw new BudgetSoftCapDeclined(category, window);
 	}
+
+	private async requirePreflightApproval(
+		category: string,
+		estimate: Estimate,
+		caps: CategoryCaps,
+	): Promise<void> {
+		if (this.preflightApprovedForSession.has(category)) {
+			return;
+		}
+		const preflightCap = caps.preflight_prompt_cap!;
+		const decision = await this.requestApproval({
+			category,
+			reason: 'preflight',
+			unit: caps.unit as BudgetUnit,
+			estimate: estimate.value,
+			preflightCap,
+		});
+		if (decision === 'approve') {
+			return;
+		}
+		if (decision === 'approve-for-session') {
+			this.preflightApprovedForSession.add(category);
+			return;
+		}
+		throw new BudgetPreflightDeclined(category, estimate.value, preflightCap, caps.unit);
+	}
+
+	private requestApproval(
+		request: Omit<BudgetApprovalRequestParams, 'correlationId'>,
+	): Promise<ApprovalDecision> {
+		const correlationId = this.deps.newApprovalId();
+		return new Promise<ApprovalDecision>(resolve => {
+			this.pendingApprovals.set(correlationId, { resolve });
+			this.deps.requestApproval({ correlationId, ...request });
+		});
+	}
 }
 
 export interface BudgetMeterDeps {
@@ -230,6 +308,13 @@ export interface BudgetMeterDeps {
 	readonly newApprovalId: () => string;
 	/** Wall-clock source, injected for deterministic tests. */
 	readonly now: () => number;
+	/**
+	 * Fired after every ledger transition (reserve/commit/rollback). Wired
+	 * to the webview as a `budget.changed` notification — the webview
+	 * re-fetches the snapshot rather than trying to apply a delta. Optional
+	 * so unit tests don't need to stub it.
+	 */
+	readonly onLedgerChanged?: () => void;
 }
 
 export interface ReserveContext {

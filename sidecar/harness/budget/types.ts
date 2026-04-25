@@ -20,6 +20,15 @@ export interface CategoryCaps {
 	readonly daily_hard_cap: number;
 	readonly weekly_soft_cap: number;
 	readonly weekly_hard_cap: number;
+	/**
+	 * Optional per-call cost above which {@link BudgetMeter.reserve} prompts
+	 * the user before letting the call run. Independent of cumulative
+	 * windowed spend: a first-of-the-day expensive browser-loop step or
+	 * multi-worker spawn still asks even though the daily soft cap is
+	 * untouched. Absence means "no preflight prompt for this category" —
+	 * the per-call cap remains the only single-call limit.
+	 */
+	readonly preflight_prompt_cap?: number;
 }
 
 /** Parsed `budgets.yaml` after schema validation. */
@@ -143,5 +152,20 @@ export class BudgetSoftCapDeclined extends Error {
 	) {
 		super(`User declined soft-cap approval for ${category} (${window}).`);
 		this.name = 'BudgetSoftCapDeclined';
+	}
+}
+
+export class BudgetPreflightDeclined extends Error {
+	readonly code = 'BUDGET_PREFLIGHT_DECLINED';
+	constructor(
+		public readonly category: string,
+		public readonly estimate: number,
+		public readonly preflightCap: number,
+		public readonly unit: Unit,
+	) {
+		super(
+			`User declined preflight approval for ${category}: estimate ${estimate} ${unit} > preflight cap ${preflightCap} ${unit}`,
+		);
+		this.name = 'BudgetPreflightDeclined';
 	}
 }
