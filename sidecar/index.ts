@@ -248,6 +248,8 @@ export function buildAgent(opts: BuildAgentOptions): Agent {
 		emitChunk: params => opts.server.notify('message.chunk', params),
 		approvalGate: opts.gate,
 		systemPrompt: opts.wiring.systemPrompt,
+		persistence: opts.budget.persistence,
+		sessionId: opts.budget.sessionId,
 	});
 }
 
@@ -380,7 +382,7 @@ async function buildWorkerSubsystem(deps: {
 				query: deps.sdk.query,
 				cwd: process.cwd(),
 				env: deps.env,
-				model,
+				model: resolveClaudeModelAlias(model),
 				// Workers do not get the harness allowlist, the canUseTool
 				// hook, or the settings/mcpServers from the parent. Tool
 				// allowlisting is the WorkerDispatcher's job; tool
@@ -437,6 +439,27 @@ function buildCanUseTool(_server: RpcServer, gate: ApprovalGate): ClaudeCanUseTo
 		}
 		return { behavior: 'deny', message: outcome.reason };
 	};
+}
+
+/**
+ * Resolve a worker-role `defaultModel` alias (e.g. `'opus'`, `'sonnet'`,
+ * `'haiku'`) into the SDK-recognised Claude model id the pricing table
+ * keys on. Aliases live in role definitions so `workers.yaml` can read
+ * naturally; the harness translates at the dispatch boundary so the
+ * adapter and estimator both see the canonical id.
+ */
+export function resolveClaudeModelAlias(model: string): string {
+	const lower = model.toLowerCase();
+	if (lower === 'opus') {
+		return 'claude-opus-4-7';
+	}
+	if (lower === 'sonnet') {
+		return 'claude-sonnet-4-6';
+	}
+	if (lower === 'haiku') {
+		return 'claude-haiku-4-5';
+	}
+	return model;
 }
 
 /**
