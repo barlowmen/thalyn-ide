@@ -4,10 +4,20 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Agent, type AgentTurnContext, type QueryFn } from './agent';
+import { parseBudgetConfig } from './harness/budget/config';
+import { DefaultEstimator } from './harness/budget/estimator';
+import { BudgetMeter } from './harness/budget/meter';
+import type { BudgetConfig } from './harness/budget/types';
+import { Persistence } from './harness/persistence';
 import { ApprovalGate } from './harness/tools/approval';
 import { loadAnthropicApiKey } from './keychain';
 import type {
+	BudgetApprovalReplyParams,
+	BudgetSnapshotParams,
+	BudgetSnapshotResult,
 	MessageSendParams,
 	MessageSendResult,
 	PingParams,
@@ -38,6 +48,7 @@ export function main(): void {
 	server.register<PingParams, PingResult>('ping', () => ({ timestamp: Date.now() }));
 
 	const gate = buildApprovalGate(server);
+	const budget = buildBudgetSubsystem(server);
 	const agent = buildAgent(server, gate, defaultSdkLoader);
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
@@ -46,6 +57,14 @@ export function main(): void {
 	server.registerNotification<ToolApprovalReplyParams>(
 		'tool.approval.reply',
 		params => gate.handleReply(params),
+	);
+	server.register<BudgetSnapshotParams, BudgetSnapshotResult>(
+		'budget.snapshot',
+		() => budget.meter.snapshot(),
+	);
+	server.registerNotification<BudgetApprovalReplyParams>(
+		'budget.approval.reply',
+		params => budget.meter.handleApprovalReply(params),
 	);
 
 	// Keep the process alive on stdout EPIPE when the parent goes away; Node
@@ -102,6 +121,39 @@ export function buildAgent(server: RpcServer, gate: ApprovalGate, sdkLoader: () 
 		approvalGate: gate,
 		cwd: process.cwd(),
 	});
+}
+
+/**
+ * Build the budget subsystem the sidecar exposes over RPC. Persistence
+ * runs against an in-memory SQLite handle for now: the meter, ledger,
+ * and OTEL traces stay live for the lifetime of the sidecar process and
+ * reset on restart. A real on-disk path lands alongside the rest of the
+ * session-persistence work.
+ */
+export function buildBudgetSubsystem(server: RpcServer): BudgetSubsystem {
+	const config = loadCommittedBudgetConfig();
+	const persistence = new Persistence(':memory:');
+	const sessionId = `s_${randomUUID()}`;
+	persistence.upsertSession(sessionId, Date.now());
+	const meter = new BudgetMeter(config, new DefaultEstimator(), persistence, {
+		requestApproval: params => server.notify('budget.approval.request', params),
+		newApprovalId: () => randomUUID(),
+		now: () => Date.now(),
+		onLedgerChanged: () => server.notify('budget.changed', undefined),
+	});
+	return { config, persistence, meter, sessionId };
+}
+
+export interface BudgetSubsystem {
+	readonly config: BudgetConfig;
+	readonly persistence: Persistence;
+	readonly meter: BudgetMeter;
+	readonly sessionId: string;
+}
+
+function loadCommittedBudgetConfig(): BudgetConfig {
+	const path = join(__dirname, '..', 'config', 'budgets.yaml');
+	return parseBudgetConfig(readFileSync(path, 'utf8'));
 }
 
 async function defaultSdkLoader(): Promise<QueryFn> {
