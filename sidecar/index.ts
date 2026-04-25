@@ -4,10 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'crypto';
-import { readFileSync } from 'fs';
+import { mkdir } from 'fs/promises';
+import { homedir } from 'os';
 import { join } from 'path';
 import { Agent, type AgentTurnContext, type QueryFn } from './agent';
-import { parseBudgetConfig } from './harness/budget/config';
+import { loadBudgetConfigWithOverride } from './harness/budget/config';
 import { DefaultEstimator } from './harness/budget/estimator';
 import { BudgetMeter } from './harness/budget/meter';
 import type { BudgetConfig } from './harness/budget/types';
@@ -43,12 +44,15 @@ import { RpcServer } from './rpc';
  *    belt-and-braces role carries over to the dispatcher's `invoke()`
  *    path once tool execution routes through it).
  */
-export function main(): void {
+export async function main(): Promise<void> {
 	const server = new RpcServer(process.stdin, process.stdout);
 	server.register<PingParams, PingResult>('ping', () => ({ timestamp: Date.now() }));
 
+	const paths = thalynPaths();
+	await mkdir(paths.configDir, { recursive: true });
+
 	const gate = buildApprovalGate(server);
-	const budget = buildBudgetSubsystem(server);
+	const budget = await buildBudgetSubsystem(server, paths);
 	const agent = buildAgent(server, gate, defaultSdkLoader);
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
@@ -125,14 +129,15 @@ export function buildAgent(server: RpcServer, gate: ApprovalGate, sdkLoader: () 
 
 /**
  * Build the budget subsystem the sidecar exposes over RPC. Persistence
- * runs against an in-memory SQLite handle for now: the meter, ledger,
- * and OTEL traces stay live for the lifetime of the sidecar process and
- * reset on restart. A real on-disk path lands alongside the rest of the
- * session-persistence work.
+ * opens the on-disk session DB at `paths.sessionDbPath`; meters, ledger,
+ * conversation history, and OTEL traces survive sidecar restarts. The
+ * budget config is the deep-merged result of the committed defaults at
+ * `sidecar/config/budgets.yaml` and (when present) the user override at
+ * `~/.config/thalyn/budgets.yaml`.
  */
-export function buildBudgetSubsystem(server: RpcServer): BudgetSubsystem {
-	const config = loadCommittedBudgetConfig();
-	const persistence = new Persistence(':memory:');
+export async function buildBudgetSubsystem(server: RpcServer, paths: ThalynPaths): Promise<BudgetSubsystem> {
+	const config = await loadBudgetConfigWithOverride(paths.committedBudgetsPath, paths.budgetsOverridePath);
+	const persistence = new Persistence(paths.sessionDbPath);
 	const sessionId = `s_${randomUUID()}`;
 	persistence.upsertSession(sessionId, Date.now());
 	const meter = new BudgetMeter(config, new DefaultEstimator(), persistence, {
@@ -151,9 +156,26 @@ export interface BudgetSubsystem {
 	readonly sessionId: string;
 }
 
-function loadCommittedBudgetConfig(): BudgetConfig {
-	const path = join(__dirname, '..', 'config', 'budgets.yaml');
-	return parseBudgetConfig(readFileSync(path, 'utf8'));
+/**
+ * Filesystem paths the sidecar reads and writes during startup. Centralised
+ * so tests and alternate hosts (CI, Linux distros without `~/.config`) can
+ * inject overrides without touching the wiring.
+ */
+export interface ThalynPaths {
+	readonly configDir: string;
+	readonly committedBudgetsPath: string;
+	readonly budgetsOverridePath: string;
+	readonly sessionDbPath: string;
+}
+
+export function thalynPaths(): ThalynPaths {
+	const configDir = join(homedir(), '.config', 'thalyn');
+	return {
+		configDir,
+		committedBudgetsPath: join(__dirname, '..', 'config', 'budgets.yaml'),
+		budgetsOverridePath: join(configDir, 'budgets.yaml'),
+		sessionDbPath: join(configDir, 'sessions.db'),
+	};
 }
 
 async function defaultSdkLoader(): Promise<QueryFn> {
@@ -162,5 +184,12 @@ async function defaultSdkLoader(): Promise<QueryFn> {
 }
 
 if (require.main === module) {
-	main();
+	main().catch(err => {
+		// Startup failed before the RPC handlers were registered, so the
+		// extension host has no way to receive a structured error. Surface
+		// the failure on stderr and exit non-zero; the host treats sidecar
+		// exits as a connection error and reports them to the user.
+		process.stderr.write(`thalyn sidecar startup failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+		process.exit(1);
+	});
 }
