@@ -11,12 +11,13 @@ import { registerAllRoles } from './roles';
 import type { CentralBrainFactory, WorkersYamlOverrides } from './types';
 
 /**
- * The tool names the built-in role allowlists reference. Until the
- * dispatcher pivot wires real backends for these (Phase 4+), the worker
- * dispatcher only needs their schemas — workers list them in their
- * tools array, but the SDK runs no matching backend, so workers run
- * effectively text-only for now. Schemas live in code (not YAML) so
- * a typo in a role allowlist surfaces as a TypeScript error.
+ * The tool names the built-in role allowlists reference. The worker
+ * dispatcher only needs their schemas to resolve allowlists — workers
+ * list them in their tools array, but no matching backend is wired yet,
+ * so workers run effectively text-only until tool execution moves into
+ * the harness `ToolDispatcher.invoke()` path. Schemas live in code
+ * (not YAML) so a typo in a role allowlist surfaces as a TypeScript
+ * error.
  */
 export const WORKER_TOOL_SCHEMAS: readonly ToolSchema[] = [
 	{
@@ -82,9 +83,9 @@ export const WORKER_TOOL_SCHEMAS: readonly ToolSchema[] = [
  * Minimal `Pick<ToolDispatcher, 'schemaFor'>` shim that the worker
  * dispatcher uses to resolve the role allowlists. Wraps the static
  * {@link WORKER_TOOL_SCHEMAS} table; once the harness `ToolDispatcher`
- * is the source of truth for both built-ins and MCP tools (Phase 4+),
- * the wiring layer hands the real dispatcher to `WorkerDispatcher` and
- * this shim goes away.
+ * is the source of truth for both built-ins and MCP tools, the wiring
+ * layer hands the real dispatcher to `WorkerDispatcher` and this shim
+ * goes away.
  */
 export function buildWorkerToolsView(): Pick<ToolDispatcher, 'schemaFor'> {
 	const byName = new Map(WORKER_TOOL_SCHEMAS.map(s => [s.name, s] as const));
