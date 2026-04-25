@@ -12,6 +12,28 @@ export type ToolApprovalDecision = 'approve' | 'decline' | 'approve-for-session'
 export type ToolErrorKind = 'network' | 'auth' | 'rate_limit' | 'declined' | 'unknown';
 export type ToolTier = 'read' | 'write' | 'delete' | 'external';
 
+export type BudgetUnit = 'usd' | 'gpu_seconds';
+export type BudgetWindow = 'daily' | 'weekly';
+export type BudgetApprovalReason = 'soft-cap' | 'preflight';
+
+export interface BudgetCategorySnapshot {
+	readonly category: string;
+	readonly unit: BudgetUnit;
+	readonly dailySpend: number;
+	readonly weeklySpend: number;
+	readonly dailySoftCap: number;
+	readonly dailyHardCap: number;
+	readonly weeklySoftCap: number;
+	readonly weeklyHardCap: number;
+	readonly perCallCap: number;
+	readonly preflightCap?: number;
+}
+
+export interface BudgetSnapshot {
+	readonly asOf: number;
+	readonly categories: readonly BudgetCategorySnapshot[];
+}
+
 export type WebviewToHostMessage =
 	| {
 		readonly type: 'user.submit';
@@ -23,6 +45,14 @@ export type WebviewToHostMessage =
 		readonly correlationId: CorrelationId;
 		readonly decision: ToolApprovalDecision;
 		readonly declineReason?: string;
+	}
+	| {
+		readonly type: 'budget.approval.reply';
+		readonly correlationId: CorrelationId;
+		readonly decision: ToolApprovalDecision;
+	}
+	| {
+		readonly type: 'budget.refresh';
 	};
 
 export type HostToWebviewMessage =
@@ -56,4 +86,21 @@ export type HostToWebviewMessage =
 		readonly toolUseId: string;
 		readonly summary: string;
 		readonly input: Record<string, unknown>;
+	}
+	| {
+		readonly type: 'budget.approval.request';
+		readonly correlationId: CorrelationId;
+		readonly category: string;
+		readonly reason: BudgetApprovalReason;
+		readonly unit: BudgetUnit;
+		readonly estimate: number;
+		readonly currentSpend?: number;
+		readonly window?: BudgetWindow;
+		readonly softCap?: number;
+		readonly hardCap?: number;
+		readonly preflightCap?: number;
+	}
+	| {
+		readonly type: 'budget.snapshot';
+		readonly snapshot: BudgetSnapshot;
 	};
