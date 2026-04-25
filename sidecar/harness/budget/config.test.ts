@@ -57,6 +57,27 @@ describe('parseBudgetConfig', () => {
 		expect(() => parseBudgetConfig(bad)).toThrow(/version/);
 	});
 
+	it('parses preflight_prompt_cap when present', () => {
+		const withPreflight = VALID + '\n    preflight_prompt_cap: 2.0';
+		const cfg = parseBudgetConfig(withPreflight);
+		expect(cfg.categories.subagent_opus.preflight_prompt_cap).toBe(2.0);
+	});
+
+	it('omits preflight_prompt_cap when absent', () => {
+		const cfg = parseBudgetConfig(VALID);
+		expect(cfg.categories.subagent_opus.preflight_prompt_cap).toBeUndefined();
+	});
+
+	it('rejects preflight_prompt_cap that exceeds per_call_cap', () => {
+		const bad = VALID + '\n    preflight_prompt_cap: 6.0';
+		expect(() => parseBudgetConfig(bad)).toThrow(/preflight_prompt_cap .* per_call_cap/);
+	});
+
+	it('rejects negative preflight_prompt_cap', () => {
+		const bad = VALID + '\n    preflight_prompt_cap: -0.5';
+		expect(() => parseBudgetConfig(bad)).toThrow(/preflight_prompt_cap/);
+	});
+
 	it('loads the day-one categories from the committed budgets.yaml', async () => {
 		const { readFile } = await import('node:fs/promises');
 		const { resolve } = await import('node:path');

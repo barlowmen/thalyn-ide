@@ -12,6 +12,11 @@
 # Cap semantics:
 #   - `per_call_cap` rejects any single invocation whose estimate
 #     exceeds the cap. Always hard.
+#   - `preflight_prompt_cap` (optional) prompts the user before a single
+#     call whose estimate exceeds the cap, even if cumulative spend is
+#     well under the soft caps. Independent gate from `daily_soft_cap`:
+#     "this one operation looks expensive". Omit to disable preflight
+#     for a category (per-call hard block remains).
 #   - `daily_soft_cap` / `weekly_soft_cap` prompt the user for
 #     approval when crossing the threshold; approval can be granted
 #     for the session.
@@ -32,6 +37,10 @@ categories:
   subagent_opus:
     unit: usd
     per_call_cap: 5.00
+    # A worker spawn priced above $2.00 (large context, generous output
+    # ceiling) prompts before launch — heads off "spawn 5 workers in
+    # parallel each at $2" runs that quietly burn the daily budget.
+    preflight_prompt_cap: 2.00
     daily_soft_cap: 30.00
     daily_hard_cap: 60.00
     weekly_soft_cap: 180.00
@@ -42,6 +51,7 @@ categories:
   subagent_sonnet:
     unit: usd
     per_call_cap: 2.00
+    preflight_prompt_cap: 1.00
     daily_soft_cap: 10.00
     daily_hard_cap: 20.00
     weekly_soft_cap: 60.00
@@ -63,6 +73,10 @@ categories:
   browser_loop:
     unit: usd
     per_call_cap: 0.50
+    # A loop turn priced above $0.30 is unusually expensive for browser
+    # work; prompt rather than burn through the soft cap silently across
+    # a long research session.
+    preflight_prompt_cap: 0.30
     daily_soft_cap: 15.00
     daily_hard_cap: 30.00
     weekly_soft_cap: 90.00

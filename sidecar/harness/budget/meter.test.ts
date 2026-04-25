@@ -12,6 +12,7 @@ import { BudgetMeter, type BudgetMeterDeps } from './meter.js';
 import {
 	BudgetHardCapExceeded,
 	BudgetPerCallExceeded,
+	BudgetPreflightDeclined,
 	BudgetSoftCapDeclined,
 	type BudgetConfig,
 } from './types.js';
@@ -41,6 +42,17 @@ const CONFIG: BudgetConfig = {
 			weekly_soft_cap: 1.00,
 			weekly_hard_cap: 2.00,
 		},
+		// Same shape as browser_loop but with a preflight prompt cap, so
+		// soft-cap and preflight paths exercise independently.
+		document_gen: {
+			unit: 'usd',
+			per_call_cap: 3.00,
+			preflight_prompt_cap: 1.00,
+			daily_soft_cap: 50.00,
+			daily_hard_cap: 100.00,
+			weekly_soft_cap: 200.00,
+			weekly_hard_cap: 400.00,
+		},
 		// gpu_seconds category, isolated from USD rollups.
 		local_inference: {
 			unit: 'gpu_seconds',
@@ -57,6 +69,7 @@ interface Harness {
 	persistence: Persistence;
 	meter: BudgetMeter;
 	approvals: BudgetApprovalRequestParams[];
+	ledgerChanges: () => number;
 	now: () => number;
 	setNow: (ts: number) => void;
 }
@@ -67,16 +80,19 @@ function build(initialNow = Date.parse('2026-04-24T12:00:00Z')): Harness {
 	const persistence = new Persistence(':memory:');
 	persistence.upsertSession(SESSION_ID, nowMs);
 	let counter = 0;
+	let ledgerChanges = 0;
 	const deps: BudgetMeterDeps = {
 		requestApproval: params => approvals.push(params),
 		newApprovalId: () => `budget-${++counter}`,
 		now: () => nowMs,
+		onLedgerChanged: () => { ledgerChanges++; },
 	};
 	const meter = new BudgetMeter(CONFIG, new DefaultEstimator(), persistence, deps);
 	return {
 		persistence,
 		meter,
 		approvals,
+		ledgerChanges: () => ledgerChanges,
 		now: () => nowMs,
 		setNow: ts => {
 			nowMs = ts;
@@ -148,6 +164,76 @@ describe('BudgetMeter', () => {
 					{ sessionId: SESSION_ID },
 				),
 			).rejects.toBeInstanceOf(BudgetHardCapExceeded);
+		});
+	});
+
+	describe('preflight approval flow', () => {
+		it('prompts with reason=preflight when a single estimate exceeds preflight_prompt_cap', async () => {
+			// document_gen preflight_prompt_cap=$1.00. Opus × 100_000 in + 1_000 out
+			// = $1.50 + $0.075 = $1.575 — well above $1.00, well below per_call $3.00.
+			const pending = h.meter.reserve(
+				'document_gen',
+				{ model: 'claude-opus-4-7', inputTokens: 100_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			await waitFor(() => h.approvals.length === 1);
+			expect(h.approvals[0].reason).toBe('preflight');
+			expect(h.approvals[0].category).toBe('document_gen');
+			expect(h.approvals[0].preflightCap).toBeCloseTo(1.00, 6);
+			expect(h.approvals[0].window).toBeUndefined();
+			expect(h.approvals[0].softCap).toBeUndefined();
+			h.meter.handleApprovalReply({ correlationId: h.approvals[0].correlationId, decision: 'approve' });
+			const result = await pending;
+			expect(result.reservation.category).toBe('document_gen');
+			expect(h.meter.isPreflightApprovedForSession('document_gen')).toBe(false);
+		});
+
+		it('caches preflight approval per-category on approve-for-session', async () => {
+			const first = h.meter.reserve(
+				'document_gen',
+				{ model: 'claude-opus-4-7', inputTokens: 100_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			await waitFor(() => h.approvals.length === 1);
+			h.meter.handleApprovalReply({
+				correlationId: h.approvals[0].correlationId,
+				decision: 'approve-for-session',
+			});
+			const firstResult = await first;
+			expect(h.meter.isPreflightApprovedForSession('document_gen')).toBe(true);
+
+			// Second preflight-triggering call must NOT prompt again. Roll back the
+			// first so this test stays focused on preflight rather than soft-cap.
+			h.meter.rollback(firstResult.reservation);
+			const second = await h.meter.reserve(
+				'document_gen',
+				{ model: 'claude-opus-4-7', inputTokens: 100_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			expect(h.approvals).toHaveLength(1);
+			expect(second.reservation.category).toBe('document_gen');
+		});
+
+		it('throws BudgetPreflightDeclined when the user declines', async () => {
+			const pending = h.meter.reserve(
+				'document_gen',
+				{ model: 'claude-opus-4-7', inputTokens: 100_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			await waitFor(() => h.approvals.length === 1);
+			h.meter.handleApprovalReply({ correlationId: h.approvals[0].correlationId, decision: 'decline' });
+			await expect(pending).rejects.toBeInstanceOf(BudgetPreflightDeclined);
+		});
+
+		it('does not prompt when the estimate is at or below preflight_prompt_cap', async () => {
+			// Opus × 60_000 in + 1_000 out = $0.90 + $0.075 = $0.975 — under $1.00 cap.
+			const result = await h.meter.reserve(
+				'document_gen',
+				{ model: 'claude-opus-4-7', inputTokens: 60_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			expect(h.approvals).toHaveLength(0);
+			expect(result.reservation.category).toBe('document_gen');
 		});
 	});
 
@@ -304,6 +390,58 @@ describe('BudgetMeter', () => {
 			expect(swept).toBe(1);
 			expect(h.meter.rollupDaily('subagent_opus')).toBe(0);
 			expect(h.persistence.listOrphanReservations()).toHaveLength(0);
+		});
+	});
+
+	describe('snapshot', () => {
+		it('returns one row per configured category with caps and current rollups', async () => {
+			seedCommitted(h.persistence, {
+				category: 'subagent_opus',
+				unit: 'usd',
+				actual: 2.5,
+				ts: h.now(),
+				sessionId: SESSION_ID,
+			});
+			const snap = h.meter.snapshot();
+			expect(snap.categories.map(c => c.category).sort()).toEqual([
+				'browser_loop',
+				'document_gen',
+				'local_inference',
+				'subagent_opus',
+			]);
+			const opus = snap.categories.find(c => c.category === 'subagent_opus')!;
+			expect(opus.unit).toBe('usd');
+			expect(opus.dailySpend).toBeCloseTo(2.5, 6);
+			expect(opus.dailySoftCap).toBe(30.0);
+			expect(opus.dailyHardCap).toBe(60.0);
+			expect(opus.weeklySoftCap).toBe(180.0);
+			expect(opus.weeklyHardCap).toBe(360.0);
+			expect(opus.perCallCap).toBe(5.0);
+			expect(opus.preflightCap).toBeUndefined();
+
+			const docs = snap.categories.find(c => c.category === 'document_gen')!;
+			expect(docs.preflightCap).toBeCloseTo(1.0, 6);
+		});
+	});
+
+	describe('onLedgerChanged notifications', () => {
+		it('fires on reserve, commit, and rollback', async () => {
+			const before = h.ledgerChanges();
+			const { reservation } = await h.meter.reserve(
+				'subagent_opus',
+				{ model: 'claude-opus-4-7', inputTokens: 100_000, maxOutputTokens: 1_000 },
+				{ sessionId: SESSION_ID },
+			);
+			h.meter.commit(reservation, 1.5);
+
+			const { reservation: rolled } = await h.meter.reserve(
+				'subagent_opus',
+				{ model: 'claude-opus-4-7', inputTokens: 50_000, maxOutputTokens: 0 },
+				{ sessionId: SESSION_ID },
+			);
+			h.meter.rollback(rolled);
+
+			expect(h.ledgerChanges() - before).toBe(4);
 		});
 	});
 
