@@ -77,7 +77,34 @@ export interface ClaudeQueryOptions {
 	readonly model?: string;
 	readonly settingSources?: Array<'user' | 'project' | 'local'>;
 	readonly permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+	readonly canUseTool?: ClaudeCanUseTool;
+	/**
+	 * Inline `Settings` payload forwarded to the SDK's `settings` option.
+	 * Loaded into the SDK's flag-settings layer (highest priority among
+	 * user-controlled settings). Used for fields like
+	 * `autoMemoryDirectory` that lack a per-query knob — this is the only
+	 * way to point the SDK Memory Tool at our `~/.config/thalyn/memories/...`
+	 * directory while keeping `settingSources: []` so an unrelated user
+	 * `settings.json` cannot widen tool permissions.
+	 */
+	readonly settings?: Record<string, unknown>;
 }
+
+/**
+ * SDK-level permission decision. Mirrors the SDK's `CanUseTool` callback
+ * shape but is restated here so the adapter does not depend on the SDK's
+ * type at type-resolution time. The harness `ApprovalGate` resolves through
+ * this hook.
+ */
+export type ClaudeCanUseTool = (
+	toolName: string,
+	input: Record<string, unknown>,
+	options: { signal: AbortSignal; toolUseID: string },
+) => Promise<ClaudePermissionResult>;
+
+export type ClaudePermissionResult =
+	| { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+	| { behavior: 'deny'; message: string };
 
 /** Narrow callable shape of the SDK's `query` function. */
 export type ClaudeQueryFn = (params: {
@@ -98,6 +125,37 @@ export interface ClaudeAdapterDeps {
 	readonly env?: Record<string, string | undefined>;
 	/** Optional model override. Defaults to whatever the SDK chooses. */
 	readonly model?: string;
+	/**
+	 * Tools the brain may invoke regardless of `BrainRequest.tools`. Forwarded
+	 * verbatim to the SDK's `tools` option when the request does not declare
+	 * its own. Use for the harness-managed always-on toolset.
+	 */
+	readonly tools?: readonly string[];
+	/**
+	 * Tools the SDK is allowed to invoke without firing `canUseTool`. For
+	 * the auto-approved `read` tier (see ADR 0012). The SDK gates anything
+	 * not on this list through the `canUseTool` hook below.
+	 */
+	readonly allowedTools?: readonly string[];
+	/**
+	 * SDK permission mode forwarded to `query`. Defaults to `'default'`.
+	 * Avoid `'bypassPermissions'` — the harness gate is the authoritative
+	 * decision-maker.
+	 */
+	readonly permissionMode?: ClaudeQueryOptions['permissionMode'];
+	/**
+	 * SDK-level permission hook. The harness `ApprovalGate` plugs in here:
+	 * the SDK fires the hook on every tool the model wants to invoke, and
+	 * the gate blocks until the user approves or declines. Mirrors the
+	 * approval flow before the dispatcher takes ownership of tool execution.
+	 */
+	readonly canUseTool?: ClaudeCanUseTool;
+	/**
+	 * Inline SDK `settings` payload — forwarded to the SDK's flag-settings
+	 * layer. Used to point the SDK Memory Tool at the harness-managed
+	 * directory without enabling `settingSources: ['user']`.
+	 */
+	readonly settings?: Record<string, unknown>;
 	/**
 	 * Budget instrumentation. When present, every `send()` reserves a
 	 * cost-bearing slot, opens a GenAI span, and either commits or rolls
@@ -185,20 +243,29 @@ export class ClaudeAdapter implements CentralBrain {
 			request.signal.addEventListener('abort', abortForCaller, { once: true });
 		}
 
+		const requestedTools = request.tools.length > 0
+			? request.tools.map(t => t.name)
+			: this.deps.tools !== undefined ? [...this.deps.tools] : undefined;
 		let iterator: AsyncIterable<ClaudeSdkMessage>;
 		try {
 			iterator = this.deps.query({
 				prompt,
 				options: {
 					systemPrompt: request.system || undefined,
-					tools: request.tools.length > 0 ? request.tools.map(t => t.name) : undefined,
+					tools: requestedTools,
+					allowedTools: this.deps.allowedTools !== undefined ? [...this.deps.allowedTools] : undefined,
 					cwd: this.deps.cwd,
 					env: this.deps.env,
 					model: this.deps.model,
 					abortController,
+					permissionMode: this.deps.permissionMode ?? 'default',
+					canUseTool: this.deps.canUseTool,
+					settings: this.deps.settings,
 					// Opt out of user/project settings files so a stray
 					// `~/.claude/settings.json` allowlist cannot widen the
-					// adapter's permissions behind the harness's back.
+					// adapter's permissions behind the harness's back. The
+					// harness gate (via `canUseTool` above) is the
+					// authoritative permission decision either way.
 					settingSources: [],
 				},
 			});
@@ -259,9 +326,33 @@ export class ClaudeAdapter implements CentralBrain {
 					// `done` event below.
 					break;
 				}
-				// `user` and `system` messages carry SDK-internal bookkeeping
-				// (tool results produced by the SDK's own tool runner,
-				// session init). The brain contract does not expose them.
+				if (message.type === 'user') {
+					// SDK-internal `user` messages carry the tool runner's
+					// output for tool calls the SDK executed itself. Surface
+					// them as `tool_result` brain events — adapters that run
+					// tools internally report results this way until the
+					// harness dispatcher's `invoke()` becomes the
+					// authoritative tool path. See the doc on
+					// {@link BrainToolResultEvent}.
+					for (const block of message.message.content) {
+						if (block.type !== 'tool_result') {
+							continue;
+						}
+						const tr = block as { tool_use_id: string; content: unknown; is_error?: boolean };
+						yield {
+							kind: 'tool_result',
+							result: {
+								id: tr.tool_use_id,
+								content: renderToolResult(tr.content),
+								isError: Boolean(tr.is_error),
+							},
+						};
+					}
+					continue;
+				}
+				// `system` messages carry SDK-internal bookkeeping (session
+				// init, hook lifecycle, etc.); the brain contract does not
+				// expose them.
 			}
 			if (request.signal?.aborted) {
 				outcome = { kind: 'cancelled' };
@@ -399,6 +490,24 @@ function joinText(content: readonly BrainContent[]): string {
 		}
 	}
 	return parts.join('\n');
+}
+
+function renderToolResult(content: unknown): string {
+	if (typeof content === 'string') {
+		return content;
+	}
+	if (Array.isArray(content)) {
+		return content
+			.map(block => {
+				const text = (block as { text?: unknown } | null | undefined)?.text;
+				if (typeof text === 'string') {
+					return text;
+				}
+				return JSON.stringify(block);
+			})
+			.join('\n');
+	}
+	return JSON.stringify(content);
 }
 
 function errorEvent(error: BrainError): BrainStreamEvent {

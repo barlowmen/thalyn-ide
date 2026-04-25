@@ -3,18 +3,27 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { trace as otelTrace, type Tracer } from '@opentelemetry/api';
 import { randomUUID } from 'crypto';
 import { mkdir } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
-import { Agent, type AgentTurnContext, type QueryFn } from './agent';
+import { Agent } from './agent';
+import {
+	ClaudeAdapter,
+	type ClaudeCanUseTool,
+	type ClaudePermissionResult,
+	type ClaudeQueryFn,
+} from './harness/brain/claude-adapter';
+import type { BrainRequest } from './harness/brain/types';
 import { loadBudgetConfigWithOverride } from './harness/budget/config';
 import { DefaultEstimator } from './harness/budget/estimator';
 import { BudgetMeter } from './harness/budget/meter';
-import type { BudgetConfig } from './harness/budget/types';
+import type { BudgetConfig, CallDescriptor } from './harness/budget/types';
 import { Persistence } from './harness/persistence';
 import { ApprovalGate } from './harness/tools/approval';
 import { loadAnthropicApiKey } from './keychain';
+import { allowedTools as harnessAllowedTools, enabledTools, getToolDefinition } from './tools';
 import type {
 	BudgetApprovalReplyParams,
 	BudgetSnapshotParams,
@@ -53,7 +62,8 @@ export async function main(): Promise<void> {
 
 	const gate = buildApprovalGate(server);
 	const budget = await buildBudgetSubsystem(server, paths);
-	const agent = buildAgent(server, gate, defaultSdkLoader);
+	const tracer = otelTrace.getTracer('thalyn-sidecar');
+	const agent = buildAgent(server, gate, budget, tracer, defaultSdkLoader);
 	server.register<MessageSendParams, MessageSendResult>(
 		'message.send',
 		params => agent.runTurn(params),
@@ -97,34 +107,176 @@ export function buildApprovalGate(server: RpcServer): ApprovalGate {
 }
 
 /**
- * Constructs an Agent wired to the given RPC server and approval gate.
- * The SDK loader is injected so tests can substitute a fake; production
- * supplies `defaultSdkLoader` which dynamically imports
+ * Constructs an Agent driving a {@link ClaudeAdapter}-backed brain. The
+ * SDK loader is injected so tests can substitute a fake; production
+ * supplies `defaultSdkLoader`, which dynamically imports
  * `@anthropic-ai/claude-agent-sdk` and reads the API key from Keychain
  * (with an env-var fallback) on the first turn.
+ *
+ * The adapter is built lazily on the first message so sidecar bootstrap
+ * doesn't trigger a Keychain prompt or pull the SDK into memory until
+ * the user actually sends a message. After that, every turn shares the
+ * same adapter (and therefore the same SDK session, budget meter, and
+ * approval gate state).
  */
-export function buildAgent(server: RpcServer, gate: ApprovalGate, sdkLoader: () => Promise<QueryFn>): Agent {
-	let cached: AgentTurnContext | undefined;
+export function buildAgent(
+	server: RpcServer,
+	gate: ApprovalGate,
+	budget: BudgetSubsystem,
+	tracer: Tracer,
+	sdkLoader: () => Promise<ClaudeQueryFn>,
+	model: string = DEFAULT_BRAIN_MODEL,
+): Agent {
+	const canUseTool = buildCanUseTool(server, gate);
+
 	return new Agent({
-		getTurnContext: async () => {
-			if (cached) {
-				return cached;
-			}
-			const apiKey = await loadAnthropicApiKey();
-			const query = await sdkLoader();
-			// When no Thalyn-managed key is configured, pass process.env through
-			// unchanged so the bundled Claude Code CLI can authenticate using the
-			// OAuth tokens it manages under ~/.claude/.
-			const env: NodeJS.ProcessEnv = apiKey
-				? { ...process.env, ANTHROPIC_API_KEY: apiKey.key }
-				: { ...process.env };
-			cached = { query, env };
-			return cached;
-		},
+		getBrain: buildBrainLoader({ server, gate, budget, tracer, sdkLoader, model, canUseTool }),
 		emitChunk: params => server.notify('message.chunk', params),
 		approvalGate: gate,
-		cwd: process.cwd(),
 	});
+}
+
+/** Default Claude model used by the primary-brain adapter. */
+export const DEFAULT_BRAIN_MODEL = 'claude-opus-4-7';
+
+interface BrainLoaderDeps {
+	readonly server: RpcServer;
+	readonly gate: ApprovalGate;
+	readonly budget: BudgetSubsystem;
+	readonly tracer: Tracer;
+	readonly sdkLoader: () => Promise<ClaudeQueryFn>;
+	readonly model: string;
+	readonly canUseTool: ClaudeCanUseTool;
+}
+
+/**
+ * Returns a function that resolves a {@link ClaudeAdapter} on first
+ * call and caches it for subsequent calls. Defers Keychain access and
+ * SDK import to the first turn.
+ */
+function buildBrainLoader(deps: BrainLoaderDeps): () => Promise<ClaudeAdapter> {
+	let cached: ClaudeAdapter | undefined;
+	return async () => {
+		if (cached) {
+			return cached;
+		}
+		const apiKey = await loadAnthropicApiKey();
+		const query = await deps.sdkLoader();
+		// When no Thalyn-managed key is configured, pass process.env through
+		// unchanged so the bundled Claude Code CLI can authenticate using the
+		// OAuth tokens it manages under ~/.claude/.
+		const env: NodeJS.ProcessEnv = apiKey
+			? { ...process.env, ANTHROPIC_API_KEY: apiKey.key }
+			: { ...process.env };
+		cached = new ClaudeAdapter({
+			query,
+			cwd: process.cwd(),
+			env,
+			model: deps.model,
+			tools: enabledTools(),
+			allowedTools: harnessAllowedTools(),
+			permissionMode: 'default',
+			canUseTool: deps.canUseTool,
+			budget: {
+				meter: deps.budget.meter,
+				tracer: deps.tracer,
+				category: subagentCategoryForModel(deps.model),
+				sessionId: deps.budget.sessionId,
+				system: '',
+				estimateCall: estimateBrainCall,
+			},
+		});
+		return cached;
+	};
+}
+
+/**
+ * Glue between the SDK's per-tool permission hook and the harness
+ * `ApprovalGate`. The `canUseTool` callback the SDK calls is delegated
+ * straight through so the gate's tier policy and session-approval cache
+ * are the authoritative decision-maker.
+ *
+ * Note: the SDK does not surface the enclosing turn's correlation id to
+ * `canUseTool`. The gate uses `toolUseID` as the per-prompt identifier
+ * and tracks turn membership via {@link ApprovalGate.cancelForTurn},
+ * which the Agent invokes when a turn ends. Until the dispatcher's
+ * `invoke()` owns tool execution and supplies the turn id directly,
+ * passing an empty string here is acceptable: cancel-for-turn keys off
+ * the per-prompt id, not the turn id.
+ */
+function buildCanUseTool(_server: RpcServer, gate: ApprovalGate): ClaudeCanUseTool {
+	return async (toolName, input, opts): Promise<ClaudePermissionResult> => {
+		const def = getToolDefinition(toolName);
+		const tier = def ? def.tier : 'external';
+		const summary = def ? def.summarize(input) : `Use ${toolName}`;
+		const outcome = await gate.check({
+			toolName,
+			tier,
+			toolUseId: opts.toolUseID,
+			turnCorrelationId: '',
+			summary,
+			input,
+		});
+		if (outcome.outcome === 'approve') {
+			return { behavior: 'allow', updatedInput: input };
+		}
+		return { behavior: 'deny', message: outcome.reason };
+	};
+}
+
+/**
+ * Map a Claude model id to the budget category it meters against. Opus,
+ * Sonnet, and Haiku each have their own per-call/daily/weekly caps so a
+ * worker downshift in `workers.yaml` automatically re-buckets the spend.
+ */
+function subagentCategoryForModel(model: string): string {
+	if (model.includes('opus')) {
+		return 'subagent_opus';
+	}
+	if (model.includes('sonnet')) {
+		return 'subagent_sonnet';
+	}
+	if (model.includes('haiku')) {
+		return 'subagent_haiku';
+	}
+	// Unknown Claude families default to opus pricing — conservative
+	// (over-reserves rather than under-meters) until a category is added.
+	return 'subagent_opus';
+}
+
+/**
+ * Pre-flight estimator the meter calls before each brain turn. Counts
+ * input characters across the system prompt and message history,
+ * approximates one token per four characters (a reasonable BPE-ish
+ * heuristic for English-heavy content), and assumes the response will
+ * fill the conservative output ceiling below. Underestimates input
+ * tokens when the messages contain dense non-Latin scripts; overestimates
+ * output cost on most turns. Reconciliation at commit time absorbs both
+ * directions once real usage numbers are surfaced by the SDK.
+ */
+function estimateBrainCall(request: BrainRequest, model: string | undefined): CallDescriptor {
+	let chars = request.system.length;
+	for (const msg of request.messages) {
+		for (const block of msg.content) {
+			if (block.type === 'text') {
+				chars += block.text.length;
+			} else if (block.type === 'tool_use') {
+				chars += JSON.stringify(block.input).length + block.name.length;
+			} else if (block.type === 'tool_result') {
+				if (typeof block.content === 'string') {
+					chars += block.content.length;
+				} else {
+					chars += JSON.stringify(block.content).length;
+				}
+			}
+		}
+	}
+	const inputTokens = Math.max(1, Math.ceil(chars / 4));
+	return {
+		model: model ?? DEFAULT_BRAIN_MODEL,
+		inputTokens,
+		maxOutputTokens: 4096,
+	};
 }
 
 /**
@@ -178,9 +330,9 @@ export function thalynPaths(): ThalynPaths {
 	};
 }
 
-async function defaultSdkLoader(): Promise<QueryFn> {
+async function defaultSdkLoader(): Promise<ClaudeQueryFn> {
 	const sdk = await import('@anthropic-ai/claude-agent-sdk');
-	return sdk.query as unknown as QueryFn;
+	return sdk.query as unknown as ClaudeQueryFn;
 }
 
 if (require.main === module) {

@@ -107,10 +107,19 @@ export interface BrainToolResultContent extends ToolResult {
 /**
  * Events the brain emits while a turn is in progress. The stream is
  * terminated by exactly one of `done` or `error`.
+ *
+ * `tool_result` is transitional: emitted only by adapters that own tool
+ * execution internally (the Claude Agent SDK runs `Read`/`Write`/`Bash`
+ * itself today). Once tool execution moves to the harness dispatcher's
+ * `invoke()` (per ADR 0011), the dispatcher delivers results to the
+ * agent directly and adapters stop emitting this event. The shape stays
+ * in the type so adapters that never externalize tool execution remain
+ * conformant.
  */
 export type BrainStreamEvent =
 	| BrainTextEvent
 	| BrainToolUseEvent
+	| BrainToolResultEvent
 	| BrainDoneEvent
 	| BrainErrorEvent;
 
@@ -133,6 +142,19 @@ export interface BrainTextEvent {
 export interface BrainToolUseEvent {
 	readonly kind: 'tool_use';
 	readonly call: ToolCall;
+}
+
+/**
+ * A tool result the brain learned about during the turn. Today this
+ * fires only for adapters that run tools themselves (the Claude Agent
+ * SDK's built-in tool runner) and is purely informational — the result
+ * is already part of the SDK's session state when this event arrives.
+ * Consumers display the result; they do not need to feed it back to the
+ * brain on the next turn.
+ */
+export interface BrainToolResultEvent {
+	readonly kind: 'tool_result';
+	readonly result: ToolResult;
 }
 
 /**

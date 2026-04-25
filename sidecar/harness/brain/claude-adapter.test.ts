@@ -176,7 +176,7 @@ describe('ClaudeAdapter.send', () => {
 		]);
 	});
 
-	it('ignores SDK-internal user/system messages (tool results, init)', async () => {
+	it('ignores SDK system init messages but surfaces tool results as brain events', async () => {
 		const { query } = scriptedQuery([
 			{ type: 'system', subtype: 'init', session_id: 'sess-x' },
 			{
@@ -194,7 +194,7 @@ describe('ClaudeAdapter.send', () => {
 
 		const events = await collect(adapter.send(baseRequest()));
 
-		expect(events.map(e => e.kind)).toEqual(['text', 'done']);
+		expect(events.map(e => e.kind)).toEqual(['tool_result', 'text', 'done']);
 	});
 
 	it('errors with tool_schema when no user message has text content', async () => {
@@ -395,6 +395,86 @@ describe('ClaudeAdapter.send', () => {
 		const error = (events[0] as Extract<BrainStreamEvent, { kind: 'error' }>).error as BrainError & { kind: 'rate_limit' };
 		expect(error.kind).toBe('rate_limit');
 		expect(error.retryAfterMs).toBeUndefined();
+	});
+
+	it('forwards canUseTool, allowedTools, permissionMode, and inline settings to the SDK', async () => {
+		const canUseTool: NonNullable<ClaudeQueryOptions['canUseTool']> = async () => ({ behavior: 'allow' });
+		const settings = { autoMemoryDirectory: '/home/u/.config/thalyn/memories/claude' };
+		const { query, captured } = scriptedQuery([resultSuccess()]);
+		const adapter = new ClaudeAdapter({
+			query,
+			tools: ['Read', 'Write', 'Edit', 'Bash'],
+			allowedTools: ['Read'],
+			permissionMode: 'default',
+			canUseTool,
+			settings,
+		});
+
+		await collect(adapter.send(baseRequest()));
+
+		expect(captured.options?.tools).toEqual(['Read', 'Write', 'Edit', 'Bash']);
+		expect(captured.options?.allowedTools).toEqual(['Read']);
+		expect(captured.options?.permissionMode).toBe('default');
+		expect(captured.options?.canUseTool).toBe(canUseTool);
+		expect(captured.options?.settings).toEqual(settings);
+		expect(captured.options?.settingSources).toEqual([]);
+	});
+
+	it('surfaces SDK-driven tool results as tool_result brain events with rendered content', async () => {
+		const { query } = scriptedQuery([
+			assistantToolUse('tu_1', 'Read', { file_path: '/tmp/a' }),
+			{
+				type: 'user',
+				message: {
+					content: [
+						{ type: 'tool_result', tool_use_id: 'tu_1', content: 'file bytes' },
+					],
+				},
+			} as ClaudeSdkMessage,
+			assistantText('did it'),
+			resultSuccess(),
+		]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const stream = await collect(adapter.send(baseRequest({ tools: [readTool] })));
+
+		expect(stream.map(e => e.kind)).toEqual(['tool_use', 'tool_result', 'text', 'done']);
+		const toolResult = stream.find(e => e.kind === 'tool_result');
+		expect(toolResult).toEqual({
+			kind: 'tool_result',
+			result: { id: 'tu_1', content: 'file bytes', isError: false },
+		});
+	});
+
+	it('renders array-shaped SDK tool result content into the tool_result event', async () => {
+		const { query } = scriptedQuery([
+			{
+				type: 'user',
+				message: {
+					content: [
+						{
+							type: 'tool_result',
+							tool_use_id: 'tu_2',
+							content: [
+								{ type: 'text', text: 'line 1' },
+								{ type: 'text', text: 'line 2' },
+							],
+							is_error: true,
+						},
+					],
+				},
+			} as ClaudeSdkMessage,
+			resultSuccess(),
+		]);
+		const adapter = new ClaudeAdapter({ query });
+
+		const stream = await collect(adapter.send(baseRequest()));
+
+		const toolResult = stream.find(e => e.kind === 'tool_result');
+		expect(toolResult).toEqual({
+			kind: 'tool_result',
+			result: { id: 'tu_2', content: 'line 1\nline 2', isError: true },
+		});
 	});
 });
 
